@@ -1,40 +1,37 @@
-//! Authentication flow: wait for user to log in via CLI/TUI before
-//! the daemon starts accepting general requests.
+//! Authentication flow.
+//!
+//! Sends the initial TDLib authorization trigger and waits until
+//! `AuthorizationState::Ready` is received via the event channel.
 
 use anyhow::Result;
-use tdlib::enums::{AuthorizationState, InputPhoneNumber, Function};
-use tdlib::functions;
 use tracing::info;
 
 use crate::handler::AppState;
 
-/// Block until TDLib reaches `AuthorizationState::Ready`.
-/// If a session already exists the transition is instant.
+/// Wait until TDLib reaches authorized state.
+///
+/// If a session already exists, this returns immediately.
+/// Otherwise, the daemon sends auth state events that clients
+/// (tg login / tg-tui) can respond to with phone/code/password.
 pub async fn ensure_authorized(state: &AppState) -> Result<()> {
-    // Trigger the auth state machine
+    // If already authorized from a previous session, we're done
+    if state.td.is_authorized() {
+        info!("✅  Already authorized (existing session)");
+        return Ok(());
+    }
+
+    // Trigger the auth state machine by sending getAuthorizationState
     state
         .td
-        .send_async(Function::SetAuthenticationPhoneNumber(
-            tdlib::functions::SetAuthenticationPhoneNumber {
-                phone_number: state.config.phone.clone(),
-                settings: tdlib::types::PhoneNumberAuthenticationSettings {
-                    allow_flash_call: false,
-                    allow_missed_call: false,
-                    allow_sms_retriever_api: false,
-                    is_current_phone_number: true,
-                    authentication_tokens: Vec::new(),
-                },
-            },
-        ))
+        .send(serde_json::json!({
+            "@type": "getAuthorizationState"
+        }))
         .await;
 
-    info!(
-        "Auth: if this is a fresh session, use `tg login` or TUI to enter phone/code."
-    );
+    info!("⏳  Waiting for authorization…");
+    info!("    Use `tg login` or `tg-tui` to complete the login flow.");
 
-    // Poll until authorized — the auth state updates arrive via broadcast
-    // and are also visible via tdlib receive loop.
-    // For now, just wait until the flag flips (set by receive_loop).
+    // Wait for the authorized flag to flip
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
         interval.tick().await;

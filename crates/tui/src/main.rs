@@ -1,4 +1,6 @@
-//! Telegram TUI — a terminal chat client powered by ratatui.
+//! `tg-tui` — Terminal UI for Telegram, powered by ratatui.
+//!
+//! Connects to `tgcd` via IPC and provides a vim-like chat interface.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -11,18 +13,17 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 use tg_common::config::TgConfig;
+use tg_common::ipc::IpcClient;
+use tg_common::protocol::{methods, ServerMessage};
 
 // ── Application state ──────────────────────────────────────────────
 
@@ -46,7 +47,6 @@ struct App {
 struct DialogItem {
     id: i64,
     title: String,
-    last_msg: String,
     unread: i32,
 }
 
@@ -55,7 +55,6 @@ struct ChatMessage {
     sender: String,
     text: String,
     time: String,
-    is_self: bool,
 }
 
 impl App {
@@ -85,7 +84,7 @@ async fn main() -> Result<()> {
     let socket = &config.socket_path;
 
     if !socket.exists() {
-        eprintln!("❌  Daemon not running. Start it first: tg-daemon");
+        eprintln!("❌  Daemon not running. Start it first: tgcd");
         std::process::exit(1);
     }
 
@@ -97,25 +96,21 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Connect to daemon
-    let stream = UnixStream::connect(socket).await?;
-    let (reader, mut writer) = stream.split();
-    let mut reader = BufReader::new(reader);
+    let mut client = IpcClient::connect(socket).await?;
 
-    // Channel for daemon → UI events
-    let (ev_tx, mut ev_rx) = mpsc::channel::<serde_json::Value>(64);
+    // Channel for server messages → UI
+    let (ev_tx, mut ev_rx) = mpsc::channel::<ServerMessage>(64);
 
-    // Background reader task
+    // Spawn background reader
     tokio::spawn(async move {
-        let mut line = String::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if let Ok(msg) = serde_json::from_str::<Value>(&line) {
-                        let _ = ev_tx.send(msg).await;
+            match client.read_message().await {
+                Ok(msg) => {
+                    if ev_tx.send(msg).await.is_err() {
+                        break;
                     }
                 }
+                Err(_) => break,
             }
         }
     });
@@ -123,7 +118,16 @@ async fn main() -> Result<()> {
     let mut app = App::new();
 
     // Request initial dialogs
-    send_request(&mut writer, "list_dialogs", serde_json::json!({ "limit": 50 })).await?;
+    // (The background reader will pick up the response)
+    let config2 = TgConfig::load()?;
+    let mut writer_client = IpcClient::connect(&config2.socket_path).await?;
+    writer_client
+        .send_request(&tg_common::protocol::Request {
+            id: 1,
+            method: methods::LIST_DIALOGS.to_string(),
+            params: serde_json::json!({ "limit": 50 }),
+        })
+        .await?;
     app.status = "Loading dialogs…".into();
 
     let tick_rate = Duration::from_millis(100);
@@ -132,17 +136,15 @@ async fn main() -> Result<()> {
     // ── Main loop ──────────────────────────────────────────────
 
     loop {
-        // Draw
         terminal.draw(|f| ui(f, &app))?;
 
-        // Handle input
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                handle_key(key, &mut app, &mut writer).await?;
+                handle_key(key, &mut app, &mut writer_client).await?;
             }
         }
 
@@ -150,9 +152,9 @@ async fn main() -> Result<()> {
             last_tick = Instant::now();
         }
 
-        // Handle daemon events
+        // Handle server messages
         while let Ok(msg) = ev_rx.try_recv() {
-            handle_server_event(&msg, &mut app, &mut writer).await;
+            handle_server_message(&msg, &mut app);
         }
 
         if !app.running {
@@ -160,7 +162,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -172,26 +173,22 @@ async fn main() -> Result<()> {
 async fn handle_key(
     key: KeyEvent,
     app: &mut App,
-    writer: &mut (impl AsyncWriteExt + Unpin),
+    client: &mut IpcClient,
 ) -> Result<()> {
     match app.focus {
         Focus::Dialogs => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                app.running = false;
-            }
-            KeyCode::Char('i') | KeyCode::Enter => {
-                app.focus = Focus::Input;
-            }
+            KeyCode::Char('q') | KeyCode::Esc => app.running = false,
+            KeyCode::Char('i') | KeyCode::Enter => app.focus = Focus::Input,
             KeyCode::Char('j') | KeyCode::Down => {
                 if app.selected < app.dialogs.len().saturating_sub(1) {
                     app.selected += 1;
-                    load_messages(app, writer).await?;
+                    load_messages(app, client).await?;
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if app.selected > 0 {
                     app.selected -= 1;
-                    load_messages(app, writer).await?;
+                    load_messages(app, client).await?;
                 }
             }
             KeyCode::Char('/') => {
@@ -208,21 +205,22 @@ async fn handle_key(
                 app.focus = Focus::Dialogs;
             }
             KeyCode::Enter => {
-                let text = app.input.drain(..).collect::<String>();
+                let text: String = app.input.drain(..).collect();
                 app.input_cursor = 0;
                 if !text.is_empty() {
                     if text.starts_with('/') {
-                        handle_command(&text, app, writer).await?;
+                        handle_command(&text, app, client).await?;
                     } else if let Some(chat_id) = app.current_chat_id() {
-                        send_request(
-                            writer,
-                            "send_message",
-                            serde_json::json!({
-                                "chat_id": chat_id,
-                                "text": text
-                            }),
-                        )
-                        .await?;
+                        client
+                            .send_request(&tg_common::protocol::Request {
+                                id: 0,
+                                method: methods::SEND_MESSAGE.to_string(),
+                                params: serde_json::json!({
+                                    "chat_id": chat_id,
+                                    "text": text
+                                }),
+                            })
+                            .await?;
                     }
                 }
             }
@@ -237,15 +235,15 @@ async fn handle_key(
                     app.input.remove(app.input_cursor);
                 }
             }
-            KeyCode::Left => {
-                app.input_cursor = app.input_cursor.saturating_sub(1);
-            }
+            KeyCode::Left => app.input_cursor = app.input_cursor.saturating_sub(1),
             KeyCode::Right => {
                 if app.input_cursor < app.input.len() {
                     app.input_cursor += 1;
                 }
             }
-            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
                 app.input.insert(app.input_cursor, c);
                 app.input_cursor += 1;
             }
@@ -255,119 +253,103 @@ async fn handle_key(
     Ok(())
 }
 
-async fn handle_command(
-    cmd: &str,
-    app: &mut App,
-    writer: &mut (impl AsyncWriteExt + Unpin),
-) -> Result<()> {
+async fn handle_command(cmd: &str, app: &mut App, client: &mut IpcClient) -> Result<()> {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     match parts[0] {
         "/q" => app.running = false,
         "/search" => {
             if let Some(chat_id) = app.current_chat_id() {
                 let query = parts.get(1).unwrap_or(&"");
-                send_request(
-                    writer,
-                    "search",
-                    serde_json::json!({ "chat_id": chat_id, "query": query }),
-                )
-                .await?;
+                client
+                    .send_request(&tg_common::protocol::Request {
+                        id: 0,
+                        method: methods::SEARCH.to_string(),
+                        params: serde_json::json!({ "chat_id": chat_id, "query": query }),
+                    })
+                    .await?;
                 app.status = format!("Searching for: {query}");
             }
         }
         "/read" => {
             if let Some(chat_id) = app.current_chat_id() {
-                send_request(writer, "mark_read", serde_json::json!({ "chat_id": chat_id })).await?;
+                client
+                    .send_request(&tg_common::protocol::Request {
+                        id: 0,
+                        method: methods::MARK_READ.to_string(),
+                        params: serde_json::json!({ "chat_id": chat_id }),
+                    })
+                    .await?;
                 app.status = "Marked as read".into();
             }
         }
-        _ => {
-            app.status = format!("Unknown command: {}", parts[0]);
-        }
+        _ => app.status = format!("Unknown command: {}", parts[0]),
     }
     Ok(())
 }
 
-async fn load_messages(
-    app: &mut App,
-    writer: &mut (impl AsyncWriteExt + Unpin),
-) -> Result<()> {
+async fn load_messages(app: &mut App, client: &mut IpcClient) -> Result<()> {
     if let Some(chat_id) = app.current_chat_id() {
-        send_request(
-            writer,
-            "get_messages",
-            serde_json::json!({ "chat_id": chat_id, "limit": 50 }),
-        )
-        .await?;
+        client
+            .send_request(&tg_common::protocol::Request {
+                id: 0,
+                method: methods::GET_MESSAGES.to_string(),
+                params: serde_json::json!({ "chat_id": chat_id, "limit": 50 }),
+            })
+            .await?;
         app.status = format!("Loading messages for chat {chat_id}…");
     }
     Ok(())
 }
 
-// ── Server event handling ──────────────────────────────────────────
+// ── Server message handling ────────────────────────────────────────
 
-async fn handle_server_event(
-    msg: &Value,
-    app: &mut App,
-    writer: &mut (impl AsyncWriteExt + Unpin),
-) {
-    let tp = msg["type"].as_str().unwrap_or("");
-    match tp {
-        "event" => {
-            let name = msg["name"].as_str().unwrap_or("");
-            if name == "new_message" {
-                // Refresh messages if we're in the relevant chat
-                if let Some(chat_id) = app.current_chat_id() {
-                    let _ = send_request(
-                        writer,
-                        "get_messages",
-                        serde_json::json!({ "chat_id": chat_id, "limit": 50 }),
-                    )
-                    .await;
-                }
+fn handle_server_message(msg: &ServerMessage, app: &mut App) {
+    match msg {
+        ServerMessage::Response(resp) => {
+            if let Some(err) = &resp.error {
+                app.status = format!("❌  {}", err.message);
+                return;
             }
-        }
-        "response" => {
-            if let Some(result) = msg.get("result") {
+            if let Some(result) = &resp.result {
                 // Detect response type by shape
-                if let Some(chat_ids) = result["chat_ids"].as_array() {
+                if let Some(dialogs) = result.as_array() {
                     app.dialogs.clear();
-                    for (i, id) in chat_ids.iter().enumerate() {
-                        let id = id.as_i64().unwrap_or(0);
-                        app.dialogs.push(DialogItem {
-                            id,
-                            title: format!("Chat #{id}"),
-                            last_msg: String::new(),
-                            unread: 0,
-                        });
+                    for (_i, item) in dialogs.iter().enumerate() {
+                        let id = item["chat_id"].as_i64().unwrap_or(0);
+                        let title = item["title"]
+                            .as_str()
+                            .unwrap_or(&format!("Chat #{id}"))
+                            .to_string();
+                        let unread = item["unread_count"].as_i64().unwrap_or(0) as i32;
+                        app.dialogs.push(DialogItem { id, title, unread });
                     }
                     app.status = format!("{} dialogs loaded", app.dialogs.len());
-                    // Auto-load messages for first dialog
-                    let _ = load_messages(app, writer).await;
-                } else if let Some(messages) = result["messages"].as_array() {
+                } else if let Some(messages) = result.as_array() {
                     app.messages.clear();
-                    for m in messages.iter().rev() {
-                        let text = m["content"]["text"]["text"]
+                    for m in messages.iter() {
+                        let text = m["text"]
                             .as_str()
-                            .or_else(|| m["content"]["caption"]["text"].as_str())
                             .unwrap_or("[media]");
-                        let sender_id = m["sender_id"]["user_id"].as_i64().unwrap_or(0);
+                        let sender_id = m["sender_id"].as_i64().unwrap_or(0);
                         let ts = m["date"].as_i64().unwrap_or(0);
-                        let time = format_time(ts);
                         app.messages.push(ChatMessage {
                             id: m["id"].as_i64().unwrap_or(0),
                             sender: format!("user#{sender_id}"),
                             text: text.to_string(),
-                            time,
-                            is_self: false,
+                            time: format_time(ts),
                         });
                     }
                 }
-            } else if let Some(err) = msg.get("error") {
-                app.status = format!("❌ {}", err["message"]);
             }
         }
-        _ => {}
+        ServerMessage::Event(ev) => {
+            if ev.name == "new_message" {
+                app.status = "📨  New message".into();
+            }
+        }
+        ServerMessage::AuthState(auth) => {
+            app.status = format!("🔐  Auth: {}", auth.state);
+        }
     }
 }
 
@@ -377,10 +359,10 @@ fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // header
-            Constraint::Min(1),    // body
-            Constraint::Length(1), // input
-            Constraint::Length(1), // status bar
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(f.area());
 
@@ -389,7 +371,7 @@ fn ui(f: &mut Frame, app: &App) {
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
     f.render_widget(header, chunks[0]);
 
-    // Body: sidebar + chat
+    // Body
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -419,9 +401,10 @@ fn ui(f: &mut Frame, app: &App) {
             } else {
                 String::new()
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{prefix}{}", d.title), style),
-            ]))
+            ListItem::new(Line::from(vec![Span::styled(
+                format!("{prefix}{}", d.title),
+                style,
+            )]))
         })
         .collect();
     let dialog_list = List::new(dialogs).block(
@@ -444,20 +427,14 @@ fn ui(f: &mut Frame, app: &App) {
                 ),
                 Span::styled(
                     format!("{}: ", m.sender),
-                    Style::default()
-                        .fg(if m.is_self { Color::Green } else { Color::Cyan })
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(&m.text),
             ])
         })
         .collect();
     let chat = Paragraph::new(messages)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Messages "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Messages "))
         .wrap(Wrap { trim: false });
     f.render_widget(chat, body_chunks[1]);
 
@@ -477,28 +454,11 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(input, chunks[2]);
 
     // Status bar
-    let status = Paragraph::new(app.status.clone())
-        .style(Style::default().fg(Color::DarkGray));
+    let status = Paragraph::new(app.status.clone()).style(Style::default().fg(Color::DarkGray));
     f.render_widget(status, chunks[3]);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
-
-async fn send_request(
-    writer: &mut (impl AsyncWriteExt + Unpin),
-    method: &str,
-    params: Value,
-) -> Result<()> {
-    let req = serde_json::json!({
-        "id": 1,
-        "method": method,
-        "params": params,
-    });
-    let line = serde_json::to_string(&req)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    Ok(())
-}
 
 fn format_time(ts: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};

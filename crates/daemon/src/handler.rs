@@ -1,22 +1,20 @@
-//! Request handler — maps incoming RPC requests to TDLib calls
-//! and returns JSON responses.
+//! Request handler — maps incoming IPC requests to raw TDLib JSON queries.
 
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use serde_json::Value as JsonValue;
 use anyhow::Result;
-use tdlib::enums::Function;
-use tdlib::functions as f;
+use serde_json::Value as JsonValue;
+use tokio::sync::broadcast;
 use tracing::info;
 
 use tg_common::config::TgConfig;
 use tg_common::protocol::{methods, Request, Response, RpcError};
 
-use crate::tdlib_client::TdClient;
+use crate::cache::Cache;
+use crate::tdlib::TdClient;
 
 pub struct AppState {
     pub config: TgConfig,
     pub td: TdClient,
+    pub cache: Cache,
     pub event_tx: broadcast::Sender<JsonValue>,
 }
 
@@ -49,57 +47,38 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
         }
 
         methods::GET_ME => {
-            let resp = state
+            state
                 .td
-                .send_async(Function::GetMe(f::GetMe))
+                .send(serde_json::json!({"@type": "getMe"}))
                 .await;
-            Ok(resp)
+            // Response arrives asynchronously; for now return acknowledgment
+            Ok(serde_json::json!({"status": "sent", "method": "getMe"}))
         }
 
         methods::LIST_DIALOGS => {
             let limit = params
                 .get("limit")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(20) as i32;
-            let resp = state
-                .td
-                .send_async(Function::GetChats(f::GetChats {
-                    chat_list: tdlib::enums::ChatList::Main,
-                    limit,
-                }))
-                .await;
-            Ok(resp)
-        }
+                .unwrap_or(20);
 
-        methods::SEND_MESSAGE => {
-            let chat_id = params["chat_id"]
-                .as_i64()
-                .ok_or_else(|| anyhow::anyhow!("missing chat_id"))?;
-            let text = params["text"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing text"))?;
-            let resp = state
+            // Try cache first
+            match state.cache.get_dialogs(limit).await {
+                Ok(dialogs) if !dialogs.is_empty() => {
+                    return Ok(serde_json::to_value(dialogs)?);
+                }
+                _ => {}
+            }
+
+            // Fall through to TDLib
+            state
                 .td
-                .send_async(Function::SendMessage(f::SendMessage {
-                    chat_id,
-                    message_thread_id: 0,
-                    reply_to: None,
-                    reply_markup: None,
-                    options: None,
-                    input_message_content:
-                        tdlib::enums::InputMessageContent::InputMessageText(
-                            tdlib::types::InputMessageText {
-                                text: tdlib::types::FormattedText {
-                                    text: text.to_string(),
-                                    entities: Vec::new(),
-                                },
-                                clear_draft: false,
-                                link_preview_options: None,
-                            },
-                        ),
+                .send(serde_json::json!({
+                    "@type": "getChats",
+                    "chat_list": {"@type": "chatListMain"},
+                    "limit": limit
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent", "method": "getChats"}))
         }
 
         methods::GET_MESSAGES => {
@@ -109,18 +88,53 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
             let limit = params
                 .get("limit")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(20) as i32;
-            let resp = state
+                .unwrap_or(20);
+
+            // Try cache first
+            match state.cache.get_messages(chat_id, limit).await {
+                Ok(msgs) if !msgs.is_empty() => {
+                    return Ok(serde_json::to_value(msgs)?);
+                }
+                _ => {}
+            }
+
+            state
                 .td
-                .send_async(Function::GetChatHistory(f::GetChatHistory {
-                    chat_id,
-                    from_message_id: 0,
-                    offset: 0,
-                    limit,
-                    only_local: false,
+                .send(serde_json::json!({
+                    "@type": "getChatHistory",
+                    "chat_id": chat_id,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": limit,
+                    "only_local": false
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent", "method": "getChatHistory"}))
+        }
+
+        methods::SEND_MESSAGE => {
+            let chat_id = params["chat_id"]
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("missing chat_id"))?;
+            let text = params["text"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing text"))?;
+
+            state
+                .td
+                .send(serde_json::json!({
+                    "@type": "sendMessage",
+                    "chat_id": chat_id,
+                    "input_message_content": {
+                        "@type": "inputMessageText",
+                        "text": {
+                            "@type": "formattedText",
+                            "text": text
+                        }
+                    }
+                }))
+                .await;
+            Ok(serde_json::json!({"status": "sent", "method": "sendMessage"}))
         }
 
         methods::SEARCH => {
@@ -133,22 +147,26 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
             let limit = params
                 .get("limit")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(20) as i32;
-            let resp = state
+                .unwrap_or(20);
+
+            // Try local cache search
+            match state.cache.search_messages(chat_id, query, limit).await {
+                Ok(msgs) if !msgs.is_empty() => {
+                    return Ok(serde_json::to_value(msgs)?);
+                }
+                _ => {}
+            }
+
+            state
                 .td
-                .send_async(Function::SearchChatMessages(f::SearchChatMessages {
-                    chat_id,
-                    query: query.to_string(),
-                    sender_id: None,
-                    from_message_id: 0,
-                    offset: 0,
-                    limit,
-                    filter: tdlib::enums::SearchMessagesFilter::Empty,
-                    message_thread_id: 0,
-                    saved_messages_topic_id: 0,
+                .send(serde_json::json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": chat_id,
+                    "query": query,
+                    "limit": limit
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent", "method": "searchChatMessages"}))
         }
 
         methods::FORWARD_MESSAGE => {
@@ -161,18 +179,17 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
             let msg_id = params["message_id"]
                 .as_i64()
                 .ok_or_else(|| anyhow::anyhow!("missing message_id"))?;
-            let resp = state
+
+            state
                 .td
-                .send_async(Function::ForwardMessages(f::ForwardMessages {
-                    chat_id: to_chat,
-                    message_thread_id: 0,
-                    from_chat_id: from_chat,
-                    message_ids: vec![msg_id],
-                    send_copy: false,
-                    remove_caption: false,
+                .send(serde_json::json!({
+                    "@type": "forwardMessages",
+                    "chat_id": to_chat,
+                    "from_chat_id": from_chat,
+                    "message_ids": [msg_id]
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent"}))
         }
 
         methods::DELETE_MESSAGE => {
@@ -182,58 +199,113 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
             let msg_id = params["message_id"]
                 .as_i64()
                 .ok_or_else(|| anyhow::anyhow!("missing message_id"))?;
-            let resp = state
+
+            state
                 .td
-                .send_async(Function::DeleteMessages(f::DeleteMessages {
-                    chat_id,
-                    message_ids: vec![msg_id],
-                    revoke: true,
+                .send(serde_json::json!({
+                    "@type": "deleteMessages",
+                    "chat_id": chat_id,
+                    "message_ids": [msg_id],
+                    "revoke": true
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent"}))
         }
 
         methods::MARK_READ => {
             let chat_id = params["chat_id"]
                 .as_i64()
                 .ok_or_else(|| anyhow::anyhow!("missing chat_id"))?;
-            let resp = state
+
+            state
                 .td
-                .send_async(Function::ViewMessages(f::ViewMessages {
-                    chat_id,
-                    message_ids: Vec::new(),
-                    force_read: true,
-                    source: None,
+                .send(serde_json::json!({
+                    "@type": "viewMessages",
+                    "chat_id": chat_id,
+                    "message_ids": [],
+                    "force_read": true
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent"}))
         }
 
         methods::DOWNLOAD_FILE => {
             let file_id = params["file_id"]
                 .as_i64()
-                .ok_or_else(|| anyhow::anyhow!("missing file_id"))? as i32;
-            let resp = state
+                .ok_or_else(|| anyhow::anyhow!("missing file_id"))?;
+
+            state
                 .td
-                .send_async(Function::DownloadFile(f::DownloadFile {
-                    file_id,
-                    priority: 1,
-                    offset: 0,
-                    limit: 0,
-                    synchronous: true,
+                .send(serde_json::json!({
+                    "@type": "downloadFile",
+                    "file_id": file_id,
+                    "priority": 1,
+                    "synchronous": true
                 }))
                 .await;
-            Ok(resp)
+            Ok(serde_json::json!({"status": "sent"}))
         }
 
         methods::LOGOUT => {
-            let resp = state.td.send_async(Function::LogOut(f::LogOut)).await;
-            Ok(resp)
+            state
+                .td
+                .send(serde_json::json!({"@type": "logOut"}))
+                .await;
+            Ok(serde_json::json!({"status": "sent"}))
         }
 
         methods::SHUTDOWN => {
             info!("Shutdown requested");
             std::process::exit(0);
+        }
+
+        // Auth interactive methods
+        methods::AUTH_PHONE => {
+            let phone = params["phone"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing phone"))?;
+            state
+                .td
+                .send(serde_json::json!({
+                    "@type": "setAuthenticationPhoneNumber",
+                    "phone_number": phone,
+                    "settings": {
+                        "@type": "phoneNumberAuthenticationSettings",
+                        "allow_flash_call": false,
+                        "allow_missed_call": false,
+                        "is_current_phone_number": true
+                    }
+                }))
+                .await;
+            Ok(serde_json::json!({"status": "sent"}))
+        }
+
+        methods::AUTH_CODE => {
+            let code = params["code"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing code"))?;
+            state
+                .td
+                .send(serde_json::json!({
+                    "@type": "checkAuthenticationCode",
+                    "code": code
+                }))
+                .await;
+            Ok(serde_json::json!({"status": "sent"}))
+        }
+
+        methods::AUTH_PASSWORD => {
+            let pw = params["password"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing password"))?;
+            state
+                .td
+                .send(serde_json::json!({
+                    "@type": "checkAuthenticationPassword",
+                    "password": pw
+                }))
+                .await;
+            Ok(serde_json::json!({"status": "sent"}))
         }
 
         _ => Err(anyhow::anyhow!("unknown method: {}", method)),

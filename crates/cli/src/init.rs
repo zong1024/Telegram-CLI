@@ -39,14 +39,20 @@ pub fn run() -> Result<()> {
         api_hash: api_hash.trim().to_string(),
         phone: phone.trim().to_string(),
         socket_path: tg_common::config::default_socket_path(),
-        database_dir: tg_common::config::default_database_dir(),
+        database_path: tg_common::config::default_database_path(),
+        tdlib_dir: tg_common::config::default_tdlib_dir(),
         verbosity: 0,
         test: false,
     };
 
     config.save()?;
 
+    // Store credentials in keyring
+    if config.store_credentials().is_ok() {
+        println!("🔑  Credentials stored in system keyring.");
+    }
+
     println!("\n✅  Config saved to {}", path.display());
-    println!("   Next: start the daemon with `tg-daemon`, then log in with `tg login`.");
+    println!("   Next: start the daemon with `tgcd`, then log in with `tg login`.");
     Ok(())
 }

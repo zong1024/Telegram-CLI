@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/tdjson",
     "crates/common",
     "crates/daemon",
     "crates/cli",
@@ -15,26 +16,35 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 # async runtime
-tokio = { version = "1", features = ["full"] }
+tokio         = { version = "1", features = ["full"] }
+tokio-util    = { version = "0.7", features = ["codec"] }
+futures-util  = "0.3"
 # serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
 # errors
-anyhow = "1"
-thiserror = "2"
+anyhow        = "1"
+thiserror     = "2"
 # logging
-tracing = "0.1"
+tracing       = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap          = { version = "4", features = ["derive"] }
 # TUI
-ratatui = "0.29"
-crossterm = "0.28"
-# TDLib
-tdlib = "0.7"
+ratatui       = "0.29"
+crossterm     = "0.28"
+# database
+sqlx          = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# config & secrets
+directories   = "6"
+toml          = "0.8"
+keyring       = { version = "3", features = ["sync-secret-service"] }
+# misc
+dirs          = "5"  # still used in tdjson build.rs
 
 # workspace crates
-tg-common   = { path = "crates/common" }
-tg-daemon   = { path = "crates/daemon" }
-tg-cli      = { path = "crates/cli" }
-tg-tui      = { path = "crates/tui" }
+tg-tdjson     = { path = "crates/tdjson" }
+tg-common     = { path = "crates/common" }
+tg-daemon     = { path = "crates/daemon" }
+tg-cli        = { path = "crates/cli" }
+tg-tui        = { path = "crates/tui" }

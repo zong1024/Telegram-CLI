@@ -1,0 +1,12 @@
+[package]
+name = "tg-tdjson"
+version.workspace = true
+edition.workspace = true
+links = "tdjson"
+
+[dependencies]
+serde_json = { workspace = true }
+tracing    = { workspace = true }
+
+[build-dependencies]
+pkg-config = "0.3"

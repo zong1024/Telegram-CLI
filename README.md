@@ -3,97 +3,121 @@
 **TDLib + Rust daemon + TUI/CLI** — a full-featured Telegram client for your terminal.
 
 ```
-CLI / TUI 前端
-       │
-       │ Unix Socket / JSON-RPC
-       ▼
-Rust Core Daemon  (tg-daemon)
-       │
-       │ FFI / tdjson
-       ▼
-TDLib / libtdjson
-       │
-       ▼
-Telegram Network + Local TDLib Database
+tg / tg-tui  (前端)
+      │
+      │ Unix Socket, LengthDelimitedCodec
+      ▼
+    tgcd     (Rust daemon, tokio)
+      │
+      │ 自写 tdjson FFI (libtdjson.so)
+      ▼
+  TDLib C    (libtdjson)
+      │
+      ▼
+Telegram Cloud + 本地 TDLib DB + SQLite Cache
 ```
 
 ## Architecture
 
 | Component | Binary | Description |
 |-----------|--------|-------------|
-| **tg-daemon** | `tg-daemon` | Background daemon — owns the TDLib connection, stores session, accepts clients via Unix socket |
-| **tg-cli** | `tg` | Command-line client — send one-shot commands to the daemon |
+| **tgcd** | `tgcd` | Background daemon — owns the TDLib connection, SQLite cache, accepts clients via Unix socket |
+| **tg** | `tg` | Command-line client — send one-shot commands to `tgcd` |
 | **tg-tui** | `tg-tui` | Full TUI chat client — ratatui-powered terminal interface |
-| **tg-common** | (lib) | Shared protocol, config, and error types |
+| **tg-common** | (lib) | Shared protocol, config, IPC client |
+| **tg-tdjson** | (lib) | Self-written FFI wrapper around `libtdjson.so` |
+
+### Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Core | TDLib / libtdjson |
+| Rust runtime | tokio |
+| Serialization | serde / serde_json |
+| Error handling | thiserror / anyhow |
+| Logging | tracing |
+| CLI | clap |
+| TUI | ratatui + crossterm |
+| Local cache | SQLite + sqlx |
+| IPC | Unix Socket + LengthDelimitedCodec + JSON |
+| Config | directories + toml + keyring |
+| Distribution | tg + tgcd + libtdjson, systemd user service |
 
 ## Quick Start
 
 ### Prerequisites
 
-1. **Telegram API credentials** — go to https://my.telegram.org/apps and create an app to get `api_id` and `api_hash`.
-2. **TDLib** — either install system-wide or let the build script compile it.
+1. **Telegram API credentials** — https://my.telegram.org/apps → get `api_id` and `api_hash`
+2. **TDLib** — install `libtdjson.so`:
+
+```bash
+# Arch
+sudo pacman -S tdlib
+
+# Ubuntu/Debian
+sudo apt install libtd-dev
+
+# macOS
+brew install tdlib
+
+# Or build from source
+./scripts/build-tdlib.sh
+```
 
 ### Install
 
 ```bash
-# Clone
 git clone https://github.com/zong1024/Telegram-CLI.git
 cd Telegram-CLI
 
-# Option A: install system TDLib
-sudo pacman -S tdlib        # Arch
-sudo apt install libtd-dev  # Debian/Ubuntu
-brew install tdlib           # macOS
+# One-click install (builds + installs binaries + systemd service)
+./scripts/install.sh
 
-# Option B: build TDLib from source
-./scripts/build-tdlib.sh
-
-# Build all Rust binaries
+# Or manual build
 cargo build --release
-
-# Binaries are now in target/release/
-ls target/release/tg target/release/tg-daemon target/release/tg-tui
 ```
 
 ### Configure
 
 ```bash
-# Interactive setup wizard
-./target/release/tg init
-# This creates ~/.config/tg-cli/config.toml
+# Interactive wizard (creates ~/.config/tg/config.toml)
+tg init
 ```
 
-Or create `~/.config/tg-cli/config.toml` manually:
+Or create `~/.config/tg/config.toml` manually:
 
 ```toml
 api_id      = 12345678
 api_hash    = "your_api_hash_here"
-phone       = "+8613800138000"   # optional, prompted at login
-socket_path = "/run/user/1000/tg-cli.sock"
-database_dir = "~/.local/share/tg-cli"
+phone       = "+8613800138000"   # optional
+socket_path = "/run/user/1000/tg/tgcd.sock"
+database_path = "/home/user/.local/share/tg/tg.db"
+tdlib_dir   = "/home/user/.local/share/tg/tdlib/"
 verbosity   = 0
 test        = false
 ```
 
+Credentials are stored in your system keyring (GNOME Keyring / KWallet / macOS Keychain) and take priority over the config file.
+
 ### Run
 
 ```bash
-# 1. Start daemon (background)
-tg-daemon &
+# Option A: systemd (recommended)
+systemctl --user start tgcd
+tg login        # interactive: phone → code → 2FA
 
-# 2. Login (interactive: phone → code → 2FA)
+# Option B: manual
+tgcd &
 tg login
 
-# 3. Use CLI commands
-tg ls                     # list chats
-tg messages 123456789     # show messages in a chat
-tg send 123456789 "Hello" # send a message
-tg search 123456789 "key" # search messages
-tg read 123456789         # mark as read
-tg status                 # daemon status
-
-# 4. Or launch the TUI
-tg-tui
+# Use
+tg ls                       # list chats
+tg messages 123456789       # show messages
+tg send 123456789 "Hello"   # send a message
+tg search 123456789 "key"   # search (hits SQLite cache first)
+tg read 123456789           # mark as read
+tg status                   # daemon status
+tg-tui                      # launch TUI
 ```
 
 ## TUI Keybindings
@@ -112,46 +136,59 @@ tg-tui
 
 ## IPC Protocol
 
-Clients and daemon communicate over a Unix socket with **newline-delimited JSON**:
+Length-delimited JSON over Unix socket (4-byte big-endian length prefix + JSON payload).
 
 ```
-→  {"id":1, "method":"send_message", "params":{"chat_id":123, "text":"Hello"}}
-←  {"type":"response", "id":1, "result":{"id":456, ...}}
-←  {"type":"event", "name":"new_message", "data":{...}}
-←  {"type":"auth_state", "state":"ready"}
+Client → Daemon:
+  ┌──────────┬──────────────────────────────────────────┐
+  │ len (4B) │ {"id":1,"method":"send_message",...}     │
+  └──────────┴──────────────────────────────────────────┘
+
+Daemon → Client:
+  ┌──────────┬──────────────────────────────────────────┐
+  │ len (4B) │ {"type":"response","id":1,"result":{…}} │
+  └──────────┴──────────────────────────────────────────┘
+  ┌──────────┬──────────────────────────────────────────┐
+  │ len (4B) │ {"type":"event","name":"new_message",…}  │
+  └──────────┴──────────────────────────────────────────┘
 ```
 
 ## Project Structure
 
 ```
 Telegram-CLI/
-├── Cargo.toml              # workspace root
+├── Cargo.toml                  # workspace root
 ├── crates/
-│   ├── common/             # shared types, config, protocol
+│   ├── tdjson/                 # self-written libtdjson FFI
+│   │   ├── build.rs            # link script (pkg-config / env / fallback)
+│   │   └── src/lib.rs          # TdJson, SharedTdJson (send/receive/execute)
+│   ├── common/                 # shared types
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── config.rs   # TgConfig, XDG paths
-│   │       ├── error.rs    # TgError
-│   │       └── protocol.rs # JSON-RPC wire format
-│   ├── daemon/             # background daemon
+│   │       ├── config.rs       # TgConfig, keyring, directories
+│   │       ├── error.rs        # TgError
+│   │       ├── ipc.rs          # IpcClient (LengthDelimitedCodec)
+│   │       └── protocol.rs     # Request, Response, Event, methods
+│   ├── daemon/                 # tgcd binary
 │   │   └── src/
-│   │       ├── main.rs     # entry, CLI args
-│   │       ├── tdlib_client.rs  # TDLib wrapper + receive loop
-│   │       ├── auth.rs     # auth state machine
-│   │       ├── handler.rs  # request → TDLib dispatch
-│   │       ├── server.rs   # Unix socket accept loop
-│   │       └── dispatcher.rs
-│   ├── cli/                # one-shot CLI
+│   │       ├── main.rs         # entry, build AppState, run IPC server
+│   │       ├── tdlib.rs        # TdClient (SharedTdJson + receive loop)
+│   │       ├── handler.rs      # method dispatch → raw TDLib JSON
+│   │       ├── ipc.rs          # LengthDelimitedCodec server
+│   │       ├── cache.rs        # SQLite (messages + dialogs tables)
+│   │       ├── auth.rs         # auth state machine
+│   │       └── dispatcher.rs   # event → cache updater
+│   ├── cli/                    # tg binary
 │   │   └── src/
-│   │       ├── main.rs     # clap commands → socket
-│   │       ├── init.rs     # config wizard
-│   │       ├── login.rs    # interactive login
-│   │       └── output.rs   # pretty-print responses
-│   └── tui/                # ratatui TUI
-│       └── src/
-│           └── main.rs     # full TUI app
+│   │       ├── main.rs         # clap commands → IpcClient
+│   │       ├── init.rs         # config wizard
+│   │       ├── login.rs        # interactive login flow
+│   │       └── output.rs       # pretty-print responses
+│   └── tui/                    # tg-tui binary
+│       └── src/main.rs         # ratatui TUI
 └── scripts/
-    └── build-tdlib.sh      # build TDLib from source
+    ├── build-tdlib.sh          # build TDLib from source
+    ├── tgcd.service            # systemd user service
+    └── install.sh              # one-click install
 ```
 
 ## License

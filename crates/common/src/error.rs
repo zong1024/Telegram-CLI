@@ -11,8 +11,11 @@ pub enum TgError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("TOML error: {0}")]
-    Toml(#[from] toml::de::Error),
+    #[error("TOML deserialize error: {0}")]
+    TomlDe(#[from] toml::de::Error),
+
+    #[error("TOML serialize error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
 
     #[error("TDLib error code {code}: {message}")]
     Tdlib { code: i32, message: String },
@@ -22,6 +25,9 @@ pub enum TgError {
 
     #[error("Connection lost")]
     ConnectionLost,
+
+    #[error("IPC frame too large: {size} bytes (max {max})")]
+    FrameTooLarge { size: usize, max: usize },
 
     #[error("{0}")]
     Other(String),

@@ -1,14 +1,15 @@
-//! Telegram CLI — thin frontend that talks to tg-daemon over a Unix socket.
+//! `tg` — Telegram CLI command-line tool.
+//!
+//! Thin frontend that sends JSON-RPC requests to `tgcd` over a
+//! length-delimited Unix socket connection.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tracing::warn;
 
 use tg_common::config::TgConfig;
-use tg_common::protocol::{methods, Request, ServerMessage, AuthState};
+use tg_common::ipc::IpcClient;
+use tg_common::protocol::methods;
 
 mod init;
 mod login;
@@ -96,10 +97,8 @@ enum Commands {
 
     /// Download file from a message
     Download {
-        /// Chat ID
-        chat: String,
-        /// Message ID (must contain media)
-        msg_id: i64,
+        /// File ID
+        file_id: i64,
     },
 
     /// Mark chat as read
@@ -126,7 +125,8 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
+    // `init` and `login` don't need daemon connection
+    match &cli.command {
         Commands::Init => {
             init::run()?;
             return Ok(());
@@ -138,63 +138,58 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    // All other commands: connect to daemon, send request, print result
+    // Connect to daemon via IpcClient
     let config = TgConfig::load()?;
     let socket = &config.socket_path;
 
     if !socket.exists() {
         anyhow::bail!(
             "Daemon not running (socket not found at {}).\n\
-             Start it with: tg-daemon",
+             Start it with: tgcd",
             socket.display()
         );
     }
 
-    let stream = UnixStream::connect(socket).await?;
-    let (reader, mut writer) = stream.split();
-    let mut reader = BufReader::new(reader);
+    let mut client = IpcClient::connect(socket).await?;
 
+    // Build request params based on command
     let (method, params) = match &cli.command {
         Commands::Me => (methods::GET_ME, json!({})),
         Commands::Ls { limit } => (methods::LIST_DIALOGS, json!({ "limit": limit })),
         Commands::Messages { chat, limit } => (
             methods::GET_MESSAGES,
-            json!({ "chat_id": chat_id_from_str(chat), "limit": limit }),
+            json!({ "chat_id": parse_chat_id(chat), "limit": limit }),
         ),
         Commands::Send { chat, text } => {
             let msg = text.join(" ");
             (
                 methods::SEND_MESSAGE,
-                json!({ "chat_id": chat_id_from_str(chat), "text": msg }),
+                json!({ "chat_id": parse_chat_id(chat), "text": msg }),
             )
         }
         Commands::Search { chat, query, limit } => (
             methods::SEARCH,
-            json!({ "chat_id": chat_id_from_str(chat), "query": query, "limit": limit }),
+            json!({ "chat_id": parse_chat_id(chat), "query": query, "limit": limit }),
         ),
         Commands::Forward { from, to, msg_id } => (
             methods::FORWARD_MESSAGE,
             json!({
-                "from_chat_id": chat_id_from_str(from),
-                "to_chat_id": chat_id_from_str(to),
+                "from_chat_id": parse_chat_id(from),
+                "to_chat_id": parse_chat_id(to),
                 "message_id": msg_id
             }),
         ),
         Commands::Delete { chat, msg_id } => (
             methods::DELETE_MESSAGE,
-            json!({ "chat_id": chat_id_from_str(chat), "message_id": msg_id }),
+            json!({ "chat_id": parse_chat_id(chat), "message_id": msg_id }),
         ),
-        Commands::Download { chat, msg_id } => {
-            // Need file_id — first get the message, then extract it.
-            // For now, pass msg_id and let daemon handle it.
-            (
-                methods::DOWNLOAD_FILE,
-                json!({ "chat_id": chat_id_from_str(chat), "message_id": msg_id }),
-            )
-        }
+        Commands::Download { file_id } => (
+            methods::DOWNLOAD_FILE,
+            json!({ "file_id": file_id }),
+        ),
         Commands::Read { chat } => (
             methods::MARK_READ,
-            json!({ "chat_id": chat_id_from_str(chat) }),
+            json!({ "chat_id": parse_chat_id(chat) }),
         ),
         Commands::Status => (methods::GET_STATUS, json!({})),
         Commands::Logout => (methods::LOGOUT, json!({})),
@@ -202,56 +197,20 @@ async fn main() -> Result<()> {
         Commands::Init | Commands::Login => unreachable!(),
     };
 
-    let req = Request {
-        id: 1,
-        method: method.to_string(),
-        params,
-    };
-
-    let line = serde_json::to_string(&req)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-
-    // Read one response line
-    let mut resp_line = String::new();
-    reader.read_line(&mut resp_line).await?;
-    let resp: serde_json::Value = serde_json::from_str(&resp_line)?;
-
-    // Also check for auth_state events that arrive before the response
-    if let Some(tp) = resp.get("type").and_then(|v| v.as_str()) {
-        match tp {
-            "auth_state" => {
-                let state = resp["state"].as_str().unwrap_or("unknown");
-                println!("🔐  Auth state: {state}");
-                return Ok(());
-            }
-            "response" => {
-                if let Some(err) = resp.get("error") {
-                    eprintln!("❌  {}", err["message"]);
-                    return Ok(());
-                }
-                if let Some(result) = resp.get("result") {
-                    output::print_result(&cli.command, result);
-                }
-            }
-            _ => {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            }
-        }
-    } else {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
+    let result = client.call(method, params).await;
+    match result {
+        Ok(val) => output::print_result(&cli.command, &val),
+        Err(e) => eprintln!("❌  {e}"),
     }
 
     Ok(())
 }
 
-/// Parse a chat ID string. Numeric strings are parsed as i64,
-/// usernames are used as-is (handled by TDLib with @ prefix).
-fn chat_id_from_str(s: &str) -> serde_json::Value {
+/// Parse a chat ID. Numeric strings → i64, usernames stay as strings.
+fn parse_chat_id(s: &str) -> serde_json::Value {
     if let Ok(id) = s.parse::<i64>() {
         json!(id)
     } else {
-        // Username — the daemon should resolve it via TDLib
         json!(s)
     }
 }

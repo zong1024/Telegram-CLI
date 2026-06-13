@@ -1,7 +1,6 @@
 //! Pretty-print daemon responses to stdout.
 
 use serde_json::Value;
-use tg_common::protocol::methods;
 use crate::Commands;
 
 pub fn print_result(cmd: &Commands, result: &Value) {

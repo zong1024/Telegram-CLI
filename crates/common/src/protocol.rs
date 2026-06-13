@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-/// JSON-RPC-like protocol over Unix socket.
-/// Messages are newline-delimited JSON.
+/// Maximum IPC frame size (16 MiB).
+pub const IPC_FRAME_MAX: usize = 16 * 1024 * 1024;
+
+/// Length-delimited JSON protocol over Unix socket.
+///
+/// Wire format: `[4-byte big-endian length][JSON payload]`
 
 // ── Client → Daemon ────────────────────────────────────────────────
 
@@ -73,6 +77,10 @@ pub mod methods {
     pub const GET_STATUS: &str = "status";
     pub const LOGOUT: &str = "logout";
     pub const SHUTDOWN: &str = "shutdown";
+    // Auth methods (client → daemon)
+    pub const AUTH_PHONE: &str = "auth_phone";
+    pub const AUTH_CODE: &str = "auth_code";
+    pub const AUTH_PASSWORD: &str = "auth_password";
 }
 
 // ── Well-known event names ─────────────────────────────────────────
