@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.pdb
+*.dylib
+*.so
+*.dll
+*.tdlib
+.env
+/sessions/
+/config.toml
