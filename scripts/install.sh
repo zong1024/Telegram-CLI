@@ -36,7 +36,7 @@ fail()  { echo -e "${RED}❌${RESET}  $*"; exit 1; }
 
 PREFIX="${PREFIX:-$HOME/.cargo/bin}"
 REPO_URL="https://github.com/zong1024/Telegram-CLI.git"
-TD_VERSION="1.8.37"
+TD_VERSION="1.8.0"
 
 # ── OS 检测 ──────────────────────────────────────────────────────────
 
@@ -173,14 +173,24 @@ install_tdlib_system() {
 
     case "$OS" in
         arch)
-            install_pkg "tdlib" && return 0 ;;
+            # Arch 官方仓库的 tdlib 是 treedec（图论库），不是 Telegram TDLib
+            # 需要从 AUR 安装 telegram-tdlib（需要 yay/paru）或从源码编译
+            if check_cmd yay; then
+                yay -S --needed --noconfirm telegram-tdlib && return 0
+            elif check_cmd paru; then
+                paru -S --needed --noconfirm telegram-tdlib && return 0
+            fi
+            warn "Arch 需要 AUR 助手 (yay/paru) 或从源码编译 TDLib"
+            return 1
+            ;;
         debian)
             if apt-cache show libtd-dev &>/dev/null 2>&1; then
                 install_pkg "libtd-dev" && return 0
             fi
             ;;
         macos)
-            install_pkg "tdlib" && return 0 ;;
+            brew install tdlib && return 0
+            ;;
     esac
 
     return 1

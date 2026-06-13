@@ -3,7 +3,7 @@
 # Requires: cmake, gperf, zlib, openssl (or gnutls)
 set -euo pipefail
 
-TD_VERSION="1.8.37"
+TD_VERSION="1.8.0"
 BUILD_DIR="${BUILD_DIR:-/tmp/tdlib-build}"
 PREFIX="${PREFIX:-/usr/local}"
 
