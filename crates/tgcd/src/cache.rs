@@ -115,10 +115,26 @@ impl Cache {
         .fetch_all(&self.pool).await?)
     }
 
+    /// Update only last_message_id without touching title or other fields.
+    pub async fn update_chat_last_msg(&self, chat_id: i64, msg_id: i64) -> Result<()> {
+        let now = now_unix();
+        sqlx::query(
+            "UPDATE chats SET last_message_id = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(msg_id).bind(now).bind(chat_id)
+        .execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn search_messages(&self, chat_id: i64, query: &str, limit: i64) -> Result<Vec<JsonMessage>> {
-        let pattern = format!("%{query}%");
+        // Escape LIKE wildcards to prevent injection
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         Ok(sqlx::query_as::<_, JsonMessage>(
-            "SELECT chat_id, message_id, sender_id, text, date, is_outgoing, content_type FROM messages WHERE chat_id = ? AND text LIKE ? ORDER BY date DESC LIMIT ?"
+            "SELECT chat_id, message_id, sender_id, text, date, is_outgoing, content_type FROM messages WHERE chat_id = ? AND text LIKE ? ESCAPE '\\' ORDER BY date DESC LIMIT ?"
         )
         .bind(chat_id).bind(pattern).bind(limit)
         .fetch_all(&self.pool).await?)

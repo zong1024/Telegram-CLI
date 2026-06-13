@@ -17,6 +17,14 @@ use crate::handler::AppState;
 
 pub async fn run(socket_path: &Path, state: AppState) -> Result<()> {
     let listener = UnixListener::bind(socket_path)?;
+
+    // Restrict socket to owner only (0600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
+    }
+
     info!("IPC listening on {}", socket_path.display());
 
     let state = Arc::new(state);

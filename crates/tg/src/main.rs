@@ -141,7 +141,18 @@ async fn main() -> Result<()> {
         ),
         Commands::Status => (methods::GET_STATUS, json!({})),
         Commands::Logout => (methods::LOGOUT, json!({})),
-        Commands::Stop => (methods::SHUTDOWN, json!({})),
+        Commands::Stop => {
+            let pid_path = config.ipc.socket_path.with_extension("pid");
+            if pid_path.exists() {
+                if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                    let pid = pid_str.trim();
+                    std::process::Command::new("kill").arg(pid).status()?;
+                    println!("✅  Sent SIGTERM to tgcd (pid {pid})");
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("Cannot find tgcd PID file. Stop manually: kill $(pgrep tgcd)");
+        }
         Commands::Init | Commands::Login | Commands::Tui => unreachable!(),
     };
 

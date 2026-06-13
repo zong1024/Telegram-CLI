@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::codec::MAX_FRAME_LEN;
-use crate::protocol::{Request, Response, RpcError, ServerMessage};
+use crate::protocol::{Request, ServerMessage};
 
 type IpcFramed = Framed<UnixStream, LengthDelimitedCodec>;
 
@@ -30,6 +30,12 @@ impl IpcClient {
         Ok(Self {
             framed: Framed::new(stream, codec),
         })
+    }
+
+    /// Split into independent reader and writer halves.
+    pub fn split(self) -> (IpcWriter, IpcReader) {
+        let (sink, stream) = self.framed.split();
+        (IpcWriter { sink }, IpcReader { stream })
     }
 
     /// Send a request and wait for the matching response (by UUID).
@@ -56,17 +62,44 @@ impl IpcClient {
         }
     }
 
-    /// Send without waiting for a response.
     pub async fn send_request(&mut self, req: &Request) -> Result<()> {
         let payload = serde_json::to_vec(req)?;
         self.framed.send(Bytes::from(payload)).await?;
         Ok(())
     }
 
-    /// Read the next server message.
     pub async fn read_message(&mut self) -> Result<ServerMessage> {
         let frame = self
             .framed
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("connection closed"))??;
+        Ok(serde_json::from_slice(&frame)?)
+    }
+}
+
+// ── Split halves ───────────────────────────────────────────────────
+
+pub struct IpcWriter {
+    sink: futures_util::stream::SplitSink<IpcFramed, Bytes>,
+}
+
+impl IpcWriter {
+    pub async fn send_request(&mut self, req: &Request) -> Result<()> {
+        let payload = serde_json::to_vec(req)?;
+        self.sink.send(Bytes::from(payload)).await?;
+        Ok(())
+    }
+}
+
+pub struct IpcReader {
+    stream: futures_util::stream::SplitStream<IpcFramed>,
+}
+
+impl IpcReader {
+    pub async fn read_message(&mut self) -> Result<ServerMessage> {
+        let frame = self
+            .stream
             .next()
             .await
             .ok_or_else(|| anyhow::anyhow!("connection closed"))??;

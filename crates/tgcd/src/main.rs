@@ -8,7 +8,6 @@ mod cache;
 mod dispatcher;
 mod handler;
 mod ipc;
-mod media;
 mod tdlib;
 
 use anyhow::Result;
@@ -92,6 +91,29 @@ async fn main() -> Result<()> {
     }))
     .await?;
 
+    // Configure proxy if enabled
+    if config.proxy.enabled {
+        let proxy_type = match config.proxy.kind.as_str() {
+            "socks5" => "proxyTypeSocks5",
+            "http" => "proxyTypeHttp",
+            "mtproto" => "proxyTypeMtproto",
+            _ => "proxyTypeSocks5",
+        };
+        td.send(serde_json::json!({
+            "@type": "addProxy",
+            "server": config.proxy.host,
+            "port": config.proxy.port as i64,
+            "enable": true,
+            "type": {
+                "@type": proxy_type,
+                "username": config.proxy.username,
+                "password": config.proxy.password,
+            }
+        }))
+        .await?;
+        info!("Proxy configured: {}://{}:{}", config.proxy.kind, config.proxy.host, config.proxy.port);
+    }
+
     // Open SQLite cache
     let cache = cache::Cache::new(&config.database_path()).await?;
 
@@ -117,6 +139,14 @@ async fn main() -> Result<()> {
         std::fs::remove_file(&config.ipc.socket_path)?;
     }
 
+    // Write PID file (for `tg stop`)
+    let pid_path = config.ipc.socket_path.with_extension("pid");
+    std::fs::write(&pid_path, std::process::id().to_string())?;
+
     // Start IPC server
-    ipc::run(&config.ipc.socket_path, state).await
+    let result = ipc::run(&config.ipc.socket_path, state).await;
+
+    // Cleanup PID file on exit
+    let _ = std::fs::remove_file(&pid_path);
+    result
 }

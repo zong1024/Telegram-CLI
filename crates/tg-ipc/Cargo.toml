@@ -4,8 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-tg-core     = { workspace = true }
-
 tokio       = { workspace = true }
 tokio-util  = { workspace = true }
 futures-util = { workspace = true }

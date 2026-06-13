@@ -54,14 +54,6 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
         methods::LIST_DIALOGS => {
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
 
-            // Try cache first
-            match state.cache.get_chats(limit).await {
-                Ok(chats) if !chats.is_empty() => {
-                    return Ok(serde_json::to_value(chats)?);
-                }
-                _ => {}
-            }
-
             let resp = tdlib::query(&state.td, serde_json::json!({
                 "@type": "getChats",
                 "chat_list": {"@type": "chatListMain"},
@@ -74,14 +66,6 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
             let chat_id = params["chat_id"].as_i64()
                 .ok_or_else(|| anyhow::anyhow!("missing chat_id"))?;
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
-
-            // Try cache first
-            match state.cache.get_messages(chat_id, limit).await {
-                Ok(msgs) if !msgs.is_empty() => {
-                    return Ok(serde_json::to_value(msgs)?);
-                }
-                _ => {}
-            }
 
             let resp = tdlib::query(&state.td, serde_json::json!({
                 "@type": "getChatHistory",
@@ -118,14 +102,7 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
                 .ok_or_else(|| anyhow::anyhow!("missing query"))?;
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
 
-            // Try local cache
-            match state.cache.search_messages(chat_id, query, limit).await {
-                Ok(msgs) if !msgs.is_empty() => {
-                    return Ok(serde_json::to_value(msgs)?);
-                }
-                _ => {}
-            }
-
+            // Search via TDLib for consistent response format
             let resp = tdlib::query(&state.td, serde_json::json!({
                 "@type": "searchChatMessages",
                 "chat_id": chat_id,
@@ -199,8 +176,8 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
         }
 
         methods::SHUTDOWN => {
-            tracing::info!("Shutdown requested");
-            std::process::exit(0);
+            tracing::warn!("Shutdown rejected — use SIGTERM or `systemctl --user stop tgcd`");
+            Err(anyhow::anyhow!("use SIGTERM or systemctl to stop the daemon"))
         }
 
         // Auth methods

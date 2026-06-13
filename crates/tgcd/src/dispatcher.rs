@@ -49,8 +49,8 @@ async fn process_event(ev: &JsonValue, cache: &Cache) -> anyhow::Result<()> {
             let chat_id = ev["chat_id"].as_i64().unwrap_or(0);
             let msg = &ev["last_message"];
             let msg_id = msg["id"].as_i64().unwrap_or(0);
-            if chat_id != 0 {
-                cache.upsert_chat(chat_id, "", "private", Some(msg_id), 0).await?;
+            if chat_id != 0 && msg_id != 0 {
+                cache.update_chat_last_msg(chat_id, msg_id).await?;
             }
         }
         "updateChatTitle" => {

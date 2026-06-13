@@ -20,7 +20,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use tg_core::config::TgConfig;
-use tg_ipc::client::IpcClient;
+use tg_ipc::client::{IpcClient, IpcWriter};
 use tg_ipc::protocol::{methods, ServerMessage};
 
 #[derive(PartialEq)]
@@ -67,26 +67,22 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut client = IpcClient::connect(socket).await?;
+    let client = IpcClient::connect(socket).await?;
+    let (mut writer, mut reader) = client.split();
 
-    let (ev_tx, mut ev_rx) = mpsc::channel::<ServerMessage>(64);
+    // Background task: read all server messages and forward to UI
+    let (msg_tx, mut msg_rx) = mpsc::channel::<ServerMessage>(128);
     tokio::spawn(async move {
-        let mut bg_client = match IpcClient::connect(
-            &TgConfig::load().map(|c| c.ipc.socket_path).unwrap_or_default(),
-        ).await {
-            Ok(c) => c,
-            Err(_) => return,
-        };
         loop {
-            match bg_client.read_message().await {
-                Ok(msg) => { if ev_tx.send(msg).await.is_err() { break; } }
+            match reader.read_message().await {
+                Ok(msg) => { if msg_tx.send(msg).await.is_err() { break; } }
                 Err(_) => break,
             }
         }
     });
 
     // Request initial dialogs
-    client.send_request(&tg_ipc::protocol::Request {
+    writer.send_request(&tg_ipc::protocol::Request {
         id: uuid::Uuid::new_v4().to_string(),
         method: methods::LIST_DIALOGS.to_string(),
         params: serde_json::json!({"limit": 50}),
@@ -104,12 +100,12 @@ pub async fn run() -> Result<()> {
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                handle_key(key, &mut app, &mut client).await?;
+                handle_key(key, &mut app, &mut writer).await?;
             }
         }
         if last_tick.elapsed() >= tick { last_tick = Instant::now(); }
 
-        while let Ok(msg) = ev_rx.try_recv() {
+        while let Ok(msg) = msg_rx.try_recv() {
             handle_event(&msg, &mut app);
         }
         if !app.running { break; }
@@ -121,7 +117,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn handle_key(key: KeyEvent, app: &mut App, client: &mut IpcClient) -> Result<()> {
+async fn handle_key(key: KeyEvent, app: &mut App, writer: &mut IpcWriter) -> Result<()> {
     match app.focus {
         Focus::Dialogs => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => app.running = false,
@@ -129,13 +125,13 @@ async fn handle_key(key: KeyEvent, app: &mut App, client: &mut IpcClient) -> Res
             KeyCode::Char('j') | KeyCode::Down => {
                 if app.selected < app.dialogs.len().saturating_sub(1) {
                     app.selected += 1;
-                    load_msgs(app, client).await?;
+                    load_msgs(app, writer).await?;
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if app.selected > 0 {
                     app.selected -= 1;
-                    load_msgs(app, client).await?;
+                    load_msgs(app, writer).await?;
                 }
             }
             KeyCode::Char('/') => {
@@ -151,7 +147,7 @@ async fn handle_key(key: KeyEvent, app: &mut App, client: &mut IpcClient) -> Res
                 if !text.is_empty() {
                     if text.starts_with("/q") { app.running = false; }
                     else if let Some(chat) = app.current_chat() {
-                        client.send_request(&tg_ipc::protocol::Request {
+                        writer.send_request(&tg_ipc::protocol::Request {
                             id: uuid::Uuid::new_v4().to_string(),
                             method: methods::SEND_MESSAGE.to_string(),
                             params: serde_json::json!({"chat_id": chat, "text": text}),
@@ -169,9 +165,9 @@ async fn handle_key(key: KeyEvent, app: &mut App, client: &mut IpcClient) -> Res
     Ok(())
 }
 
-async fn load_msgs(app: &mut App, client: &mut IpcClient) -> Result<()> {
+async fn load_msgs(app: &mut App, writer: &mut IpcWriter) -> Result<()> {
     if let Some(chat) = app.current_chat() {
-        client.send_request(&tg_ipc::protocol::Request {
+        writer.send_request(&tg_ipc::protocol::Request {
             id: uuid::Uuid::new_v4().to_string(),
             method: methods::GET_MESSAGES.to_string(),
             params: serde_json::json!({"chat_id": chat, "limit": 50}),

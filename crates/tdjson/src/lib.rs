@@ -116,12 +116,20 @@ fn receive_loop(state: Arc<ReceiveState>) {
             }
         };
 
-        // Route by @extra
-        if let Some(extra) = val.get("@extra").and_then(|v| v.as_str()) {
+        // Route by @extra — can be string (our UUIDs) or number (TDLib internal)
+        let extra_key = val
+            .get("@extra")
+            .and_then(|v| v.as_str().map(String::from))
+            .or_else(|| val.get("@extra").and_then(|v| v.as_i64()).map(|n| n.to_string()));
+
+        if let Some(ref extra) = extra_key {
             if let Some((_, sender)) = state.pending.remove(extra) {
                 let _ = sender.send(val);
                 continue;
             }
+            // @extra present but no matching pending — stale response, log and skip
+            tracing::debug!("tdjson: stale @extra={extra}, discarding");
+            continue;
         }
 
         // No @extra or no matching pending — it's an update
@@ -148,6 +156,7 @@ impl TdClient {
     }
 
     /// Send a request and wait for the response (matched by `@extra`).
+    /// Times out after 30 seconds.
     pub async fn send(&self, mut query: JsonValue) -> anyhow::Result<JsonValue> {
         let extra = uuid::Uuid::new_v4().to_string();
         query["@extra"] = serde_json::Value::String(extra.clone());
@@ -158,12 +167,15 @@ impl TdClient {
         let c_query = CString::new(query.to_string())?;
         unsafe { td_send(self.client_id, c_query.as_ptr()) }
 
-        match rx.await {
-            Ok(resp) => Ok(resp),
-            Err(_) => {
-                // Sender dropped — clean up and error
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => {
                 get_state().pending.remove(&extra);
                 anyhow::bail!("TDLib response channel closed for @extra={extra}")
+            }
+            Err(_) => {
+                get_state().pending.remove(&extra);
+                anyhow::bail!("TDLib request timed out after 30s for @extra={extra}")
             }
         }
     }
