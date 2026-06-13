@@ -5,8 +5,12 @@ edition.workspace = true
 links = "tdjson"
 
 [dependencies]
-serde_json = { workspace = true }
-tracing    = { workspace = true }
+serde_json  = { workspace = true }
+tracing     = { workspace = true }
+dashmap     = { workspace = true }
+uuid        = { workspace = true }
+tokio       = { workspace = true }
+anyhow      = { workspace = true }
 
 [build-dependencies]
 pkg-config = "0.3"

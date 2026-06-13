@@ -20,7 +20,7 @@ pub enum TgError {
     #[error("TDLib error code {code}: {message}")]
     Tdlib { code: i32, message: String },
 
-    #[error("Not authenticated. Run `tg login` first.")]
+    #[error("Not authenticated")]
     NotAuthenticated,
 
     #[error("Connection lost")]

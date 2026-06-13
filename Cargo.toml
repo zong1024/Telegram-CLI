@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "crates/tdjson",
-    "crates/common",
-    "crates/daemon",
-    "crates/cli",
-    "crates/tui",
+    "crates/tg-core",
+    "crates/tg-ipc",
+    "crates/tgcd",
+    "crates/tg",
 ]
 
 [workspace.package]
@@ -39,12 +39,15 @@ sqlx          = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 directories   = "6"
 toml          = "0.8"
 keyring       = { version = "3", features = ["sync-secret-service"] }
-# misc
-dirs          = "5"  # still used in tdjson build.rs
+# concurrency
+dashmap       = "6"
+uuid          = { version = "1", features = ["v4", "serde"] }
+bytes         = "1"
+chrono        = "0.4"
 
 # workspace crates
 tg-tdjson     = { path = "crates/tdjson" }
-tg-common     = { path = "crates/common" }
-tg-daemon     = { path = "crates/daemon" }
-tg-cli        = { path = "crates/cli" }
-tg-tui        = { path = "crates/tui" }
+tg-core       = { path = "crates/tg-core" }
+tg-ipc        = { path = "crates/tg-ipc" }
+tgcd          = { path = "crates/tgcd" }
+tg            = { path = "crates/tg" }

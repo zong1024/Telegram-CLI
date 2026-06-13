@@ -1,177 +1,191 @@
-//! Raw FFI wrapper around `libtdjson` — the TDLib shared library.
+//! Multi-client TDLib JSON wrapper (`libtdjson`).
 //!
-//! This crate provides safe(r) Rust wrappers around the three C functions:
-//!   - `td_json_client_create`
-//!   - `td_json_client_send`
-//!   - `td_json_client_receive`
-//!   - `td_json_client_execute`
-//!   - `td_json_client_destroy`
+//! Uses the multi-client API: `td_create_client_id`, `td_send`, `td_receive`.
+//! Supports `@extra` UUID tracking with oneshot channels for request-response matching.
 //!
-//! All communication is raw JSON strings. Typed wrappers can be layered on top later.
+//! # Architecture
+//!
+//! ```text
+//! TdClient (per-client)
+//!   ├─ client_id: i32
+//!   ├─ pending: DashMap<String, oneshot::Sender<JsonValue>>   ← @extra → response
+//!   └─ updates_tx: broadcast::Sender<JsonValue>              ← push updates
+//!
+//! receive_loop (shared thread)
+//!   └─ td_receive(timeout) → parse → route by @extra
+//! ```
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int};
 use std::sync::Arc;
 
-// ── FFI declarations ───────────────────────────────────────────────
+use dashmap::DashMap;
+use serde_json::Value as JsonValue;
+use tokio::sync::{broadcast, oneshot};
+use tracing::warn;
 
-type TdJsonClientPtr = *mut std::ffi::c_void;
+// ── FFI declarations ───────────────────────────────────────────────
 
 #[cfg_attr(
     all(not(target_env = "msvc"), not(target_os = "macos")),
     link(name = "tdjson")
 )]
 extern "C" {
-    fn td_json_client_create() -> TdJsonClientPtr;
-    fn td_json_client_send(client: TdJsonClientPtr, request: *const c_char);
-    fn td_json_client_receive(client: TdJsonClientPtr, timeout: c_double) -> *const c_char;
-    fn td_json_client_execute(client: TdJsonClientPtr, request: *const c_char) -> *const c_char;
-    fn td_json_client_destroy(client: TdJsonClientPtr);
+    fn td_create_client_id() -> c_int;
+    fn td_send(client_id: c_int, request: *const c_char);
+    fn td_receive(timeout: c_double) -> *const c_char;
+    fn td_execute(request: *const c_char) -> *const c_char;
 
-    // TDLib >= 1.8: log verbosity
     fn td_set_log_verbosity_level(level: c_int);
     fn td_set_log_fatal_error_callback(callback: Option<unsafe extern "C" fn(*const c_char)>);
 }
 
-// ── Public API ─────────────────────────────────────────────────────
+// ── Low-level helpers ──────────────────────────────────────────────
 
-/// A handle to the TDLib JSON client.
+/// Set TDLib log verbosity. Call once at startup.
+pub fn set_log_verbosity(level: i32) {
+    unsafe { td_set_log_verbosity_level(level) }
+}
+
+/// Execute a synchronous TDLib function (rarely used).
+pub fn execute(query: &str) -> Option<String> {
+    let c = CString::new(query).ok()?;
+    let ptr = unsafe { td_execute(c.as_ptr()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+    }
+}
+
+// ── Shared receive loop state ──────────────────────────────────────
+
+/// Shared state for all TdClient instances.
+/// One receive loop thread serves all clients.
+struct ReceiveState {
+    /// Maps `@extra` string → oneshot sender for pending requests.
+    pending: DashMap<String, oneshot::Sender<JsonValue>>,
+    /// Broadcast channel for update events (no @extra).
+    updates_tx: broadcast::Sender<JsonValue>,
+}
+
+static RECEIVE_STATE: std::sync::OnceLock<Arc<ReceiveState>> = std::sync::OnceLock::new();
+
+/// Initialize the global receive loop. Call once at startup.
+/// Returns the broadcast receiver for updates.
+pub fn init(updates_tx: broadcast::Sender<JsonValue>) {
+    let state = Arc::new(ReceiveState {
+        pending: DashMap::new(),
+        updates_tx,
+    });
+    if RECEIVE_STATE.set(state.clone()).is_err() {
+        panic!("tdjson receive loop already initialized");
+    }
+
+    std::thread::Builder::new()
+        .name("tdlib-recv".into())
+        .spawn(move || receive_loop(state))
+        .expect("failed to spawn tdlib receive loop");
+}
+
+fn get_state() -> &'static Arc<ReceiveState> {
+    RECEIVE_STATE
+        .get()
+        .expect("tdjson not initialized — call init() first")
+}
+
+// ── Receive loop ───────────────────────────────────────────────────
+
+fn receive_loop(state: Arc<ReceiveState>) {
+    tracing::info!("TDLib receive loop started");
+    loop {
+        let ptr = unsafe { td_receive(1.0) };
+        if ptr.is_null() {
+            continue; // timeout
+        }
+
+        let raw = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+
+        let val: JsonValue = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("tdjson: failed to parse response: {e}");
+                continue;
+            }
+        };
+
+        // Route by @extra
+        if let Some(extra) = val.get("@extra").and_then(|v| v.as_str()) {
+            if let Some((_, sender)) = state.pending.remove(extra) {
+                let _ = sender.send(val);
+                continue;
+            }
+        }
+
+        // No @extra or no matching pending — it's an update
+        let _ = state.updates_tx.send(val);
+    }
+}
+
+// ── TdClient — per-client handle ───────────────────────────────────
+
+/// A handle to a TDLib client instance.
 ///
-/// Internally holds a raw pointer to the C client. `Send + Sync` because
-/// the C client is thread-safe (it uses internal locks).
-pub struct TdJson {
-    ptr: TdJsonClientPtr,
-}
-
-// SAFETY: libtdjson's client is internally thread-safe.
-unsafe impl Send for TdJson {}
-unsafe impl Sync for TdJson {}
-
-impl TdJson {
-    /// Create a new TDLib JSON client.
-    pub fn new() -> Self {
-        let ptr = unsafe { td_json_client_create() };
-        assert!(!ptr.is_null(), "td_json_client_create returned null");
-        Self { ptr }
-    }
-
-    /// Create with log level. Call once before creating clients.
-    pub fn set_log_verbosity(level: i32) {
-        unsafe {
-            td_set_log_verbosity_level(level);
-        }
-    }
-
-    /// Set a fatal error callback (for logging).
-    pub fn set_fatal_error_callback(cb: Option<unsafe extern "C" fn(*const c_char)>) {
-        unsafe {
-            td_set_log_fatal_error_callback(cb);
-        }
-    }
-
-    /// Send a JSON request to TDLib. Does not return a response.
-    ///
-    /// `query` must be a valid JSON string.
-    pub fn send(&self, query: &str) {
-        let c_query = CString::new(query).expect("query contains null byte");
-        unsafe {
-            td_json_client_send(self.ptr, c_query.as_ptr());
-        }
-    }
-
-    /// Receive a JSON response/update from TDLib.
-    /// Returns `None` if the timeout expires with no data.
-    ///
-    /// `timeout` is in seconds.
-    pub fn receive(&self, timeout: f64) -> Option<String> {
-        let result = unsafe { td_json_client_receive(self.ptr, timeout) };
-        if result.is_null() {
-            None
-        } else {
-            // SAFETY: td_json_client_receive returns a null-terminated C string
-            // that remains valid until the next call to receive/execute/send.
-            Some(unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned())
-        }
-    }
-
-    /// Synchronously execute a TDLib function (only for certain simple queries).
-    /// Returns `None` if the function is not supported in synchronous mode.
-    ///
-    /// `query` must be a valid JSON string.
-    pub fn execute(&self, query: &str) -> Option<String> {
-        let c_query = CString::new(query).expect("query contains null byte");
-        let result = unsafe { td_json_client_execute(self.ptr, c_query.as_ptr()) };
-        if result.is_null() {
-            None
-        } else {
-            Some(unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned())
-        }
-    }
-}
-
-impl Drop for TdJson {
-    fn drop(&mut self) {
-        unsafe {
-            td_json_client_destroy(self.ptr);
-        }
-    }
-}
-
-/// Thread-safe wrapper that can be cloned and shared across threads.
-/// Uses `Arc` internally — the underlying C client is the same pointer.
+/// Each `TdClient` has its own `client_id` but shares the global
+/// receive loop and pending map.
 #[derive(Clone)]
-pub struct SharedTdJson {
-    inner: Arc<TdJson>,
+pub struct TdClient {
+    client_id: c_int,
 }
 
-impl SharedTdJson {
+impl TdClient {
+    /// Create a new TDLib client (calls `td_create_client_id`).
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(TdJson::new()),
+        let client_id = unsafe { td_create_client_id() };
+        Self { client_id }
+    }
+
+    /// Send a request and wait for the response (matched by `@extra`).
+    pub async fn send(&self, mut query: JsonValue) -> anyhow::Result<JsonValue> {
+        let extra = uuid::Uuid::new_v4().to_string();
+        query["@extra"] = serde_json::Value::String(extra.clone());
+
+        let (tx, rx) = oneshot::channel();
+        get_state().pending.insert(extra.clone(), tx);
+
+        let c_query = CString::new(query.to_string())?;
+        unsafe { td_send(self.client_id, c_query.as_ptr()) }
+
+        match rx.await {
+            Ok(resp) => Ok(resp),
+            Err(_) => {
+                // Sender dropped — clean up and error
+                get_state().pending.remove(&extra);
+                anyhow::bail!("TDLib response channel closed for @extra={extra}")
+            }
         }
     }
 
-    /// Send a JSON request.
-    pub fn send(&self, query: &str) {
-        self.inner.send(query);
+    /// Fire-and-forget: send without waiting for response.
+    pub fn send_no_wait(&self, query: JsonValue) {
+        let c_query = match CString::new(query.to_string()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        unsafe { td_send(self.client_id, c_query.as_ptr()) }
     }
 
-    /// Receive a JSON response/update with timeout in seconds.
-    pub fn receive(&self, timeout: f64) -> Option<String> {
-        self.inner.receive(timeout)
-    }
-
-    /// Execute a synchronous TDLib function.
-    pub fn execute(&self, query: &str) -> Option<String> {
-        self.inner.execute(query)
-    }
-
-    /// Convenience: send a JSON value.
-    pub fn send_json(&self, query: &serde_json::Value) {
-        self.send(&query.to_string());
-    }
-
-    /// Convenience: send and return raw string.
-    pub fn send_query(&self, query: &str) -> String {
-        self.send(query);
-        // TDLib responses arrive asynchronously via receive()
-        String::new()
+    /// Get the raw client_id.
+    pub fn client_id(&self) -> c_int {
+        self.client_id
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ── Convenience: subscribe to updates ──────────────────────────────
 
-    #[test]
-    fn test_create_destroy() {
-        // This test only works if libtdjson.so is available at link time.
-        let client = TdJson::new();
-        // execute is safe to call with a trivial query
-        let result = client.execute(r#"{"@type": "getOption", "name": "version"}"#);
-        // May return None if synchronous execute is not supported for this query
-        if let Some(r) = result {
-            assert!(r.contains("version") || r.contains("@type"));
-        }
-    }
+/// Subscribe to the global update broadcast channel.
+pub fn subscribe_updates() -> broadcast::Receiver<JsonValue> {
+    get_state().updates_tx.subscribe()
 }

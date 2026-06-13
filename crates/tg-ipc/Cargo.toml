@@ -1,0 +1,17 @@
+[package]
+name = "tg-ipc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tg-core     = { workspace = true }
+
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+futures-util = { workspace = true }
+bytes       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+uuid        = { workspace = true }
+tracing     = { workspace = true }

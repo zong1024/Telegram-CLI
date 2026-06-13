@@ -1,15 +1,15 @@
 # Telegram-CLI
 
-**TDLib + Rust daemon + TUI/CLI** — a full-featured Telegram client for your terminal.
+**TDLib + Rust daemon + TUI/CLI** — 完整终端 Telegram 客户端
 
-```
-tg / tg-tui  (前端)
+```text
+tg / tg tui  (前端)
       │
-      │ Unix Socket, LengthDelimitedCodec
+      │ Unix Socket, LengthDelimitedCodec, JSON
       ▼
     tgcd     (Rust daemon, tokio)
       │
-      │ 自写 tdjson FFI (libtdjson.so)
+      │ 自写 tdjson FFI (多客户端 API, @extra UUID)
       ▼
   TDLib C    (libtdjson)
       │
@@ -17,38 +17,45 @@ tg / tg-tui  (前端)
 Telegram Cloud + 本地 TDLib DB + SQLite Cache
 ```
 
-## Architecture
+## 进程模型
 
-| Component | Binary | Description |
-|-----------|--------|-------------|
-| **tgcd** | `tgcd` | Background daemon — owns the TDLib connection, SQLite cache, accepts clients via Unix socket |
-| **tg** | `tg` | Command-line client — send one-shot commands to `tgcd` |
-| **tg-tui** | `tg-tui` | Full TUI chat client — ratatui-powered terminal interface |
-| **tg-common** | (lib) | Shared protocol, config, IPC client |
-| **tg-tdjson** | (lib) | Self-written FFI wrapper around `libtdjson.so` |
+| 程序 | 作用 |
+|------|------|
+| `tgcd` | 常驻 daemon，TDLib 连接 + SQLite 缓存 + IPC 服务 |
+| `tg` | CLI 前端（`tg chats` / `tg send` / …） |
+| `tg tui` | TUI 前端（ratatui 终端界面） |
 
-### Tech Stack
+## Crate 布局
 
-| Layer | Technology |
-|-------|-----------|
-| Core | TDLib / libtdjson |
-| Rust runtime | tokio |
-| Serialization | serde / serde_json |
-| Error handling | thiserror / anyhow |
-| Logging | tracing |
+```text
+crates/
+  tdjson/    ← 自写 libtdjson FFI（多客户端 API, @extra 追踪）
+  tg-core/   ← 配置、错误、业务模型 (Chat/Message/User/Event)
+  tg-ipc/    ← IPC 协议、LengthDelimitedCodec、IpcClient
+  tgcd/      ← daemon 二进制
+  tg/        ← CLI + TUI 二进制
+```
+
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| Telegram 协议 | TDLib / libtdjson |
+| Rust 绑定 | 自写 tdjson wrapper (`td_create_client_id` / `td_send` / `td_receive`) |
+| 异步运行时 | tokio |
+| 序列化 | serde / serde_json |
+| 错误处理 | thiserror / anyhow |
+| 日志 | tracing |
 | CLI | clap |
 | TUI | ratatui + crossterm |
-| Local cache | SQLite + sqlx |
+| 本地缓存 | SQLite + sqlx |
 | IPC | Unix Socket + LengthDelimitedCodec + JSON |
-| Config | directories + toml + keyring |
-| Distribution | tg + tgcd + libtdjson, systemd user service |
+| 配置 | directories + toml + keyring |
+| 并发 | dashmap (pending map), uuid (@extra tracking) |
 
-## Quick Start
+## 快速开始
 
-### Prerequisites
-
-1. **Telegram API credentials** — https://my.telegram.org/apps → get `api_id` and `api_hash`
-2. **TDLib** — install `libtdjson.so`:
+### 依赖
 
 ```bash
 # Arch
@@ -60,135 +67,108 @@ sudo apt install libtd-dev
 # macOS
 brew install tdlib
 
-# Or build from source
+# 或从源码编译
 ./scripts/build-tdlib.sh
 ```
 
-### Install
+### 安装
 
 ```bash
 git clone https://github.com/zong1024/Telegram-CLI.git
 cd Telegram-CLI
 
-# One-click install (builds + installs binaries + systemd service)
+# 一键安装
 ./scripts/install.sh
 
-# Or manual build
+# 或手动
 cargo build --release
 ```
 
-### Configure
+### 配置
 
 ```bash
-# Interactive wizard (creates ~/.config/tg/config.toml)
-tg init
+tg init   # 交互式向导 → ~/.config/tg/config.toml
 ```
 
-Or create `~/.config/tg/config.toml` manually:
+配置示例：
 
 ```toml
-api_id      = 12345678
-api_hash    = "your_api_hash_here"
-phone       = "+8613800138000"   # optional
+[telegram]
+api_id = 12345678
+api_hash = "your_hash"
+phone = "+86..."
+
+[tdlib]
+database_directory = "~/.local/share/tg/tdlib/db"
+files_directory = "~/.local/share/tg/tdlib/files"
+use_message_database = true
+verbosity = 0
+
+[proxy]
+enabled = false
+kind = "socks5"
+host = "127.0.0.1"
+port = 7890
+
+[tui]
+enable_mouse = true
+message_page_size = 50
+
+[ipc]
 socket_path = "/run/user/1000/tg/tgcd.sock"
-database_path = "/home/user/.local/share/tg/tg.db"
-tdlib_dir   = "/home/user/.local/share/tg/tdlib/"
-verbosity   = 0
-test        = false
 ```
 
-Credentials are stored in your system keyring (GNOME Keyring / KWallet / macOS Keychain) and take priority over the config file.
-
-### Run
+### 使用
 
 ```bash
-# Option A: systemd (recommended)
-systemctl --user start tgcd
-tg login        # interactive: phone → code → 2FA
-
-# Option B: manual
+# 启动 daemon
 tgcd &
+# 或 systemctl --user start tgcd
+
+# 登录
 tg login
 
-# Use
-tg ls                       # list chats
-tg messages 123456789       # show messages
-tg send 123456789 "Hello"   # send a message
-tg search 123456789 "key"   # search (hits SQLite cache first)
-tg read 123456789           # mark as read
-tg status                   # daemon status
-tg-tui                      # launch TUI
+# CLI
+tg chats
+tg history <chat-id> --limit 50
+tg send <chat-id> "Hello"
+tg search <chat-id> "keyword"
+tg read <chat-id>
+tg download <file-id>
+tg me / tg status / tg stop
+
+# TUI
+tg tui
 ```
 
-## TUI Keybindings
+## TUI 按键
 
-| Key | Action |
-|-----|--------|
-| `j` / `↓` | Next dialog |
-| `k` / `↑` | Previous dialog |
-| `Enter` / `i` | Focus input |
-| `Esc` | Back to dialog list |
-| `Enter` (in input) | Send message |
-| `/search <query>` | Search in current chat |
-| `/read` | Mark current chat as read |
-| `/q` | Quit |
-| `q` | Quit |
+| 键 | 动作 |
+|----|------|
+| `j` / `↓` | 下一个聊天 |
+| `k` / `↑` | 上一个聊天 |
+| `i` / `Enter` | 进入输入 |
+| `Esc` | 返回聊天列表 |
+| `Enter` (输入) | 发送消息 |
+| `/q` | 退出 |
 
-## IPC Protocol
+## IPC 协议
 
-Length-delimited JSON over Unix socket (4-byte big-endian length prefix + JSON payload).
+Length-delimited JSON（4 字节大端长度 + JSON 载荷）：
 
-```
+```text
 Client → Daemon:
-  ┌──────────┬──────────────────────────────────────────┐
-  │ len (4B) │ {"id":1,"method":"send_message",...}     │
-  └──────────┴──────────────────────────────────────────┘
+  ┌──────────┬─────────────────────────────────────────────┐
+  │ len (4B) │ {"id":"<uuid>","method":"send_message",...} │
+  └──────────┴─────────────────────────────────────────────┘
 
 Daemon → Client:
-  ┌──────────┬──────────────────────────────────────────┐
-  │ len (4B) │ {"type":"response","id":1,"result":{…}} │
-  └──────────┴──────────────────────────────────────────┘
-  ┌──────────┬──────────────────────────────────────────┐
-  │ len (4B) │ {"type":"event","name":"new_message",…}  │
-  └──────────┴──────────────────────────────────────────┘
-```
-
-## Project Structure
-
-```
-Telegram-CLI/
-├── Cargo.toml                  # workspace root
-├── crates/
-│   ├── tdjson/                 # self-written libtdjson FFI
-│   │   ├── build.rs            # link script (pkg-config / env / fallback)
-│   │   └── src/lib.rs          # TdJson, SharedTdJson (send/receive/execute)
-│   ├── common/                 # shared types
-│   │   └── src/
-│   │       ├── config.rs       # TgConfig, keyring, directories
-│   │       ├── error.rs        # TgError
-│   │       ├── ipc.rs          # IpcClient (LengthDelimitedCodec)
-│   │       └── protocol.rs     # Request, Response, Event, methods
-│   ├── daemon/                 # tgcd binary
-│   │   └── src/
-│   │       ├── main.rs         # entry, build AppState, run IPC server
-│   │       ├── tdlib.rs        # TdClient (SharedTdJson + receive loop)
-│   │       ├── handler.rs      # method dispatch → raw TDLib JSON
-│   │       ├── ipc.rs          # LengthDelimitedCodec server
-│   │       ├── cache.rs        # SQLite (messages + dialogs tables)
-│   │       ├── auth.rs         # auth state machine
-│   │       └── dispatcher.rs   # event → cache updater
-│   ├── cli/                    # tg binary
-│   │   └── src/
-│   │       ├── main.rs         # clap commands → IpcClient
-│   │       ├── init.rs         # config wizard
-│   │       ├── login.rs        # interactive login flow
-│   │       └── output.rs       # pretty-print responses
-│   └── tui/                    # tg-tui binary
-│       └── src/main.rs         # ratatui TUI
-└── scripts/
-    ├── build-tdlib.sh          # build TDLib from source
-    ├── tgcd.service            # systemd user service
-    └── install.sh              # one-click install
+  ┌──────────┬─────────────────────────────────────────────┐
+  │ len (4B) │ {"type":"response","id":"<uuid>","result":…}│
+  └──────────┴─────────────────────────────────────────────┘
+  ┌──────────┬─────────────────────────────────────────────┐
+  │ len (4B) │ {"type":"event","name":"new_message",…}     │
+  └──────────┴─────────────────────────────────────────────┘
 ```
 
 ## License

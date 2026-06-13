@@ -1,18 +1,18 @@
+//! IPC protocol types.
+//!
+//! Wire format: 4-byte big-endian length prefix + JSON payload.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 /// Maximum IPC frame size (16 MiB).
 pub const IPC_FRAME_MAX: usize = 16 * 1024 * 1024;
 
-/// Length-delimited JSON protocol over Unix socket.
-///
-/// Wire format: `[4-byte big-endian length][JSON payload]`
-
 // ── Client → Daemon ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
-    pub id: u64,
+    pub id: String,  // UUID for request-response matching
     pub method: String,
     #[serde(default)]
     pub params: JsonValue,
@@ -35,7 +35,7 @@ pub enum ServerMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
-    pub id: u64,
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,7 +54,6 @@ pub struct Event {
     pub data: JsonValue,
 }
 
-/// Auth state pushed to clients so they can drive the login flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthState {
     pub state: String,
@@ -77,15 +76,13 @@ pub mod methods {
     pub const GET_STATUS: &str = "status";
     pub const LOGOUT: &str = "logout";
     pub const SHUTDOWN: &str = "shutdown";
-    // Auth methods (client → daemon)
     pub const AUTH_PHONE: &str = "auth_phone";
     pub const AUTH_CODE: &str = "auth_code";
     pub const AUTH_PASSWORD: &str = "auth_password";
 }
 
-// ── Well-known event names ─────────────────────────────────────────
-
 pub mod events {
     pub const NEW_MESSAGE: &str = "new_message";
     pub const AUTH_UPDATE: &str = "auth_update";
+    pub const FILE_UPDATE: &str = "file_update";
 }

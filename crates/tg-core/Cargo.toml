@@ -1,5 +1,5 @@
 [package]
-name = "tg-common"
+name = "tg-core"
 version.workspace = true
 edition.workspace = true
 
@@ -8,10 +8,6 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 anyhow      = { workspace = true }
 thiserror   = { workspace = true }
-tokio       = { workspace = true }
-tokio-util  = { workspace = true }
-futures-util = { workspace = true }
-bytes       = "1"
 tracing     = { workspace = true }
 directories = { workspace = true }
 toml        = { workspace = true }
