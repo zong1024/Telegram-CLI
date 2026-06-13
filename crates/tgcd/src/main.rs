@@ -124,8 +124,9 @@ async fn main() -> Result<()> {
         dispatcher::run_cache_updater(td_clone, cache_clone).await;
     });
 
-    // Wait for auth
-    let _authorized = auth::ensure_authorized(&td, &config).await;
+    // Trigger auth state machine (non-blocking)
+    // TDLib will send updateAuthorizationState events that flow to IPC clients
+    td.send_no_wait(serde_json::json!({"@type": "getAuthorizationState"}));
 
     let state = handler::AppState {
         config: config.clone(),
@@ -143,7 +144,9 @@ async fn main() -> Result<()> {
     let pid_path = config.ipc.socket_path.with_extension("pid");
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
-    // Start IPC server
+    info!("IPC server starting — use `tg login` to authenticate");
+
+    // Start IPC server (auth happens via IPC commands, not blocking here)
     let result = ipc::run(&config.ipc.socket_path, state).await;
 
     // Cleanup PID file on exit
