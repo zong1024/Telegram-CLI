@@ -55,33 +55,20 @@ crates/
 
 ## 快速开始
 
-### 依赖
-
-```bash
-# Arch
-sudo pacman -S tdlib
-
-# Ubuntu/Debian
-sudo apt install libtd-dev
-
-# macOS
-brew install tdlib
-
-# 或从源码编译
-./scripts/build-tdlib.sh
-```
-
-### 安装
+### 一键安装
 
 ```bash
 git clone https://github.com/zong1024/Telegram-CLI.git
 cd Telegram-CLI
-
-# 一键安装
 ./scripts/install.sh
+```
 
-# 或手动
-cargo build --release
+自动检测系统 → 安装 Rust（如果没有）→ 安装 TDLib（包管理器或源码编译）→ 编译项目 → 安装二进制 → 配置 systemd 服务。
+
+### 卸载
+
+```bash
+./scripts/uninstall.sh
 ```
 
 ### 配置

@@ -1,35 +1,405 @@
 #!/usr/bin/env bash
-# Install tg and tgcd, set up systemd user service.
+#
+# Telegram-CLI 一键安装脚本
+# 支持 Arch / Debian|Ubuntu / macOS
+#
+# 用法:
+#   curl -fsSL https://raw.githubusercontent.com/zong1024/Telegram-CLI/main/scripts/install.sh | bash
+#   或
+#   ./scripts/install.sh
+#
+# 环境变量:
+#   PREFIX          安装目录 (默认 ~/.cargo/bin)
+#   BUILD_TDLIB=1   强制从源码编译 TDLib
+#   SKIP_SYSTEMD=1  跳过 systemd 服务安装
+#
 set -euo pipefail
 
+# ── 颜色 ────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+info()  { echo -e "${CYAN}==>${RESET} $*"; }
+ok()    { echo -e "${GREEN}✅${RESET}  $*"; }
+warn()  { echo -e "${YELLOW}⚠️${RESET}   $*"; }
+fail()  { echo -e "${RED}❌${RESET}  $*"; exit 1; }
+
+# ── 配置 ────────────────────────────────────────────────────────────
+
 PREFIX="${PREFIX:-$HOME/.cargo/bin}"
-SERVICE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+REPO_URL="https://github.com/zong1024/Telegram-CLI.git"
+TD_VERSION="1.8.37"
+TD_BUILD_DIR="/tmp/tdlib-build-${TD_VERSION}"
 
-echo "==> Building release binaries…"
-cargo build --release
+# ── OS 检测 ──────────────────────────────────────────────────────────
 
-echo "==> Installing binaries to ${PREFIX}…"
-mkdir -p "${PREFIX}"
-cp -f target/release/tg   "${PREFIX}/tg"
-cp -f target/release/tgcd "${PREFIX}/tgcd"
-chmod +x "${PREFIX}/tg" "${PREFIX}/tgcd"
+detect_os() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        OS="macos"
+        PKG_MGR="brew"
+    elif command -v pacman &>/dev/null; then
+        OS="arch"
+        PKG_MGR="pacman"
+    elif command -v apt &>/dev/null; then
+        OS="debian"
+        PKG_MGR="apt"
+    else
+        OS="unknown"
+        PKG_MGR=""
+    fi
+    info "操作系统: ${BOLD}${OS}${RESET}"
+}
 
-echo "==> Installing systemd user service…"
-mkdir -p "${SERVICE_DIR}"
-cp -f scripts/tgcd.service "${SERVICE_DIR}/tgcd.service"
+# ── 依赖检查/安装 ────────────────────────────────────────────────────
 
-systemctl --user daemon-reload
-systemctl --user enable tgcd.service
+check_cmd() {
+    command -v "$1" &>/dev/null
+}
 
-echo ""
-echo "✅  Installation complete!"
-echo ""
-echo "  Binaries: ${PREFIX}/tg, ${PREFIX}/tgcd"
-echo "  Service:  ${SERVICE_DIR}/tgcd.service"
-echo ""
-echo "Next steps:"
-echo "  1. Run 'tg init' to create config (set api_id + api_hash)"
-echo "  2. Start daemon:  systemctl --user start tgcd"
-echo "     Or manually:   tgcd &"
-echo "  3. Login:         tg login"
-echo "  4. Use:           tg chats / tg send <chat> 'hello' / tg tui"
+install_pkg() {
+    local pkg="$1"
+    info "安装 ${pkg}…"
+    case "$PKG_MGR" in
+        pacman) sudo pacman -S --needed --noconfirm "$pkg" ;;
+        apt)    sudo apt-get update -qq && sudo apt-get install -y -qq "$pkg" ;;
+        brew)   brew install "$pkg" ;;
+        *)      warn "请手动安装 $pkg"; return 1 ;;
+    esac
+}
+
+# ── Step 1: Rust 工具链 ─────────────────────────────────────────────
+
+install_rust() {
+    if check_cmd rustc && check_cmd cargo; then
+        local ver
+        ver=$(rustc --version | awk '{print $2}')
+        ok "Rust ${ver} 已安装"
+        return
+    fi
+
+    info "安装 Rust 工具链…"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env"
+    ok "Rust $(rustc --version | awk '{print $2}') 已安装"
+}
+
+# ── Step 2: 系统依赖 ────────────────────────────────────────────────
+
+install_system_deps() {
+    info "检查系统依赖…"
+
+    local pkgs=()
+
+    case "$OS" in
+        arch)
+            check_cmd cmake  || pkgs+=(cmake)
+            check_cmd git    || pkgs+=(git)
+            check_cmd gcc    || pkgs+=(gcc)
+            check_cmd pkg-config || pkgs+=(pkgconf)
+            ;;
+        debian)
+            check_cmd cmake      || pkgs+=(cmake)
+            check_cmd git        || pkgs+=(git)
+            check_cmd gcc        || pkgs+=(build-essential)
+            check_cmd pkg-config || pkgs+=(pkg-config)
+            ;;
+        macos)
+            check_cmd cmake || pkgs+=(cmake)
+            check_cmd git   || pkgs+=(git)
+            ;;
+    esac
+
+    if [[ ${#pkgs[@]} -gt 0 ]]; then
+        for p in "${pkgs[@]}"; do
+            install_pkg "$p" || warn "跳过 $p"
+        done
+    fi
+
+    ok "系统依赖就绪"
+}
+
+# ── Step 3: TDLib / libtdjson ────────────────────────────────────────
+
+find_libtdjson() {
+    # 检查是否已经能找到 libtdjson
+    if check_cmd pkg-config && pkg-config --exists tdjson 2>/dev/null; then
+        ok "libtdjson 已安装 (pkg-config)"
+        return 0
+    fi
+
+    # 搜索常见路径
+    local search_paths=(
+        "/usr/lib/libtdjson.so"
+        "/usr/local/lib/libtdjson.so"
+        "/usr/lib/x86_64-linux-gnu/libtdjson.so"
+        "/opt/homebrew/lib/libtdjson.dylib"
+        "/usr/local/lib/libtdjson.dylib"
+    )
+
+    for p in "${search_paths[@]}"; do
+        if [[ -f "$p" ]]; then
+            ok "libtdjson 已安装: $p"
+            # 确保 linker 能找到
+            local dir
+            dir=$(dirname "$p")
+            export LIBRARY_PATH="${dir}:${LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="${dir}:${LD_LIBRARY_PATH:-}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+install_tdlib_system() {
+    info "尝试通过包管理器安装 TDLib…"
+
+    case "$OS" in
+        arch)
+            install_pkg "tdlib" && return 0 ;;
+        debian)
+            # Debian/Ubuntu 没有官方 tdlib 包，尝试 libtd-dev
+            if apt-cache show libtd-dev &>/dev/null 2>&1; then
+                install_pkg "libtd-dev" && return 0
+            fi
+            ;;
+        macos)
+            install_pkg "tdlib" && return 0 ;;
+    esac
+
+    return 1
+}
+
+build_tdlib_from_source() {
+    info "从源码编译 TDLib ${TD_VERSION}…"
+
+    local sudo_needed=""
+    if [[ ! -w "/usr/local" ]]; then
+        sudo_needed="sudo"
+    fi
+
+    # 安装编译依赖
+    case "$OS" in
+        arch)
+            sudo pacman -S --needed --noconfirm cmake gperf zlib openssl ;;
+        debian)
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cmake gperf zlib1g-dev libssl-dev ;;
+        macos)
+            brew install cmake gperf openssl ;;
+    esac
+
+    mkdir -p "$TD_BUILD_DIR"
+    cd "$TD_BUILD_DIR"
+
+    if [[ ! -d td ]]; then
+        git clone --depth 1 --branch "v${TD_VERSION}" https://github.com/tdlib/td.git
+    fi
+
+    cd td
+    mkdir -p build && cd build
+
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DTD_ENABLE_JNI=OFF
+
+    local ncpu
+    ncpu=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    cmake --build . --parallel "$ncpu"
+
+    ${sudo_needed} cmake --install .
+
+    # 刷新 linker 缓存
+    if command -v ldconfig &>/dev/null; then
+        ${sudo_needed} ldconfig
+    fi
+
+    ok "TDLib 编译安装完成"
+}
+
+setup_tdlib() {
+    if [[ "${BUILD_TDLIB:-}" == "1" ]]; then
+        build_tdlib_from_source
+        return
+    fi
+
+    if find_libtdjson; then
+        return
+    fi
+
+    warn "未找到 libtdjson"
+
+    # 尝试包管理器
+    if install_tdlib_system; then
+        if find_libtdjson; then
+            return
+        fi
+    fi
+
+    # 回退到源码编译
+    warn "包管理器未提供 TDLib，将从源码编译（约 5-10 分钟）"
+    build_tdlib_from_source
+}
+
+# ── Step 4: 编译项目 ────────────────────────────────────────────────
+
+build_project() {
+    info "编译 Telegram-CLI…"
+
+    local project_dir
+    # 如果在项目目录内，直接用；否则 clone
+    if [[ -f "Cargo.toml" ]] && grep -q "telegram-cli\|tg-tdjson" Cargo.toml 2>/dev/null; then
+        project_dir="."
+    else
+        project_dir="/tmp/Telegram-CLI"
+        if [[ ! -d "$project_dir" ]]; then
+            git clone --depth 1 "$REPO_URL" "$project_dir"
+        fi
+        cd "$project_dir"
+        git pull --ff-only 2>/dev/null || true
+    fi
+
+    cargo build --release 2>&1 | tail -3
+    ok "编译完成"
+}
+
+# ── Step 5: 安装二进制 ──────────────────────────────────────────────
+
+install_binaries() {
+    info "安装到 ${PREFIX}…"
+    mkdir -p "$PREFIX"
+
+    local bins=("tg" "tgcd")
+    for bin in "${bins[@]}"; do
+        if [[ -f "target/release/${bin}" ]]; then
+            cp -f "target/release/${bin}" "${PREFIX}/${bin}"
+            chmod +x "${PREFIX}/${bin}"
+            ok "${PREFIX}/${bin}"
+        else
+            warn "未找到 target/release/${bin}"
+        fi
+    done
+
+    # 确保 PREFIX 在 PATH 中
+    if [[ ":$PATH:" != *":${PREFIX}:"* ]]; then
+        warn "${PREFIX} 不在 PATH 中"
+        echo ""
+        echo "  添加到 shell 配置:"
+        echo "    export PATH=\"${PREFIX}:\$PATH\""
+        echo ""
+
+        # 自动添加到常见 shell 配置
+        local shell_rc=""
+        if [[ -n "${ZSH_VERSION:-}" ]] || [[ -f "$HOME/.zshrc" ]] && [[ "$SHELL" == */zsh ]]; then
+            shell_rc="$HOME/.zshrc"
+        elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+            shell_rc="$HOME/.bashrc"
+        fi
+
+        if [[ -n "$shell_rc" ]] && [[ -f "$shell_rc" ]]; then
+            if ! grep -q "export PATH=.*${PREFIX}" "$shell_rc" 2>/dev/null; then
+                echo "export PATH=\"${PREFIX}:\$PATH\"" >> "$shell_rc"
+                info "已添加到 ${shell_rc}（重启 shell 生效）"
+            fi
+        fi
+    fi
+}
+
+# ── Step 6: Systemd 服务 ────────────────────────────────────────────
+
+setup_systemd() {
+    if [[ "${SKIP_SYSTEMD:-}" == "1" ]]; then
+        info "跳过 systemd 安装"
+        return
+    fi
+
+    # 检查 systemd 是否可用
+    if ! check_cmd systemctl; then
+        warn "systemctl 未找到，跳过 systemd 服务安装"
+        return
+    fi
+
+    local service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$service_dir"
+
+    cat > "${service_dir}/tgcd.service" << EOF
+[Unit]
+Description=Telegram CLI Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${PREFIX}/tgcd
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+EOF
+
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable tgcd.service 2>/dev/null || true
+
+    ok "systemd 服务已安装: ${service_dir}/tgcd.service"
+}
+
+# ── Step 7: 完成 ────────────────────────────────────────────────────
+
+print_summary() {
+    echo ""
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════${RESET}"
+    echo -e "${GREEN}${BOLD}  ✅  Telegram-CLI 安装完成！${RESET}"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════${RESET}"
+    echo ""
+    echo -e "  ${BOLD}二进制:${RESET}  ${PREFIX}/tg  ${PREFIX}/tgcd"
+    echo ""
+    echo -e "  ${BOLD}下一步:${RESET}"
+    echo ""
+    echo -e "  ${CYAN}1.${RESET} 初始化配置（需要 api_id + api_hash）:"
+    echo -e "     ${BOLD}tg init${RESET}"
+    echo ""
+    echo -e "  ${CYAN}2.${RESET} 启动 daemon:"
+    echo -e "     ${BOLD}systemctl --user start tgcd${RESET}"
+    echo -e "     或: ${BOLD}tgcd &${RESET}"
+    echo ""
+    echo -e "  ${CYAN}3.${RESET} 登录 Telegram:"
+    echo -e "     ${BOLD}tg login${RESET}"
+    echo ""
+    echo -e "  ${CYAN}4.${RESET} 使用:"
+    echo -e "     ${BOLD}tg chats${RESET}            列出聊天"
+    echo -e "     ${BOLD}tg history <id>${RESET}      查看消息"
+    echo -e "     ${BOLD}tg send <id> \"你好\"${RESET}  发消息"
+    echo -e "     ${BOLD}tg tui${RESET}              终端界面"
+    echo ""
+    echo -e "  API 凭证: https://my.telegram.org/apps"
+    echo ""
+}
+
+# ── 主流程 ──────────────────────────────────────────────────────────
+
+main() {
+    echo ""
+    echo -e "${CYAN}${BOLD}  Telegram-CLI 安装程序${RESET}"
+    echo -e "${CYAN}  ─────────────────────${RESET}"
+    echo ""
+
+    detect_os
+    install_rust
+    install_system_deps
+    setup_tdlib
+    build_project
+    install_binaries
+    setup_systemd
+    print_summary
+}
+
+main "$@"
