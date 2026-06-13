@@ -20,6 +20,13 @@ pub async fn run() -> Result<()> {
     // Check status
     let _status = client.call(methods::GET_STATUS, json!({})).await?;
 
+    // Trigger auth state machine — TDLib will respond with current auth state
+    client.send_request(&tg_ipc::protocol::Request {
+        id: uuid::Uuid::new_v4().to_string(),
+        method: "auth_trigger".to_string(),
+        params: json!({}),
+    }).await?;
+
     println!("⏳  Waiting for auth events…\n");
 
     loop {

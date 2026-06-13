@@ -215,6 +215,14 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
             Ok(serde_json::json!({"status": "sent"}))
         }
 
+        // Trigger auth state machine (called by tg login)
+        "auth_trigger" => {
+            tdlib::notify(&state.td, serde_json::json!({
+                "@type": "getAuthorizationState"
+            }));
+            Ok(serde_json::json!({"status": "triggered"}))
+        }
+
         _ => Err(anyhow::anyhow!("unknown method: {}", method)),
     }
 }

@@ -62,11 +62,24 @@ async fn handle_client(
                     if writer.send(resp).await.is_err() { break; }
                 }
                 Ok(ev) = event_rx.recv() => {
-                    let msg = serde_json::json!({
-                        "type": "event",
-                        "name": ev.get("@type").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                        "data": ev,
-                    });
+                    let ev_type = ev.get("@type").and_then(|v| v.as_str()).unwrap_or("");
+
+                    // Convert auth state events to AuthState message
+                    let msg = if ev_type == "updateAuthorizationState" {
+                        let auth_state = &ev["authorization_state"];
+                        let state_type = auth_state.get("@type").and_then(|v| v.as_str()).unwrap_or("");
+                        auth_state_to_msg(state_type)
+                    } else if ev_type.starts_with("authorizationState") {
+                        // Direct response from getAuthorizationState
+                        auth_state_to_msg(ev_type)
+                    } else {
+                        serde_json::json!({
+                            "type": "event",
+                            "name": ev_type,
+                            "data": ev,
+                        })
+                    };
+
                     let payload = serde_json::to_vec(&msg).unwrap_or_default();
                     if writer.send(Bytes::from(payload)).await.is_err() { break; }
                 }
@@ -101,4 +114,23 @@ async fn handle_client(
 
     write_handle.abort();
     Ok(())
+}
+
+fn auth_state_to_msg(state_type: &str) -> serde_json::Value {
+    let state_str = match state_type {
+        "authorizationStateWaitPhoneNumber" => "wait_phone",
+        "authorizationStateWaitCode" => "wait_code",
+        "authorizationStateWaitPassword" => "wait_password",
+        "authorizationStateReady" => "ready",
+        "authorizationStateClosing" => "closing",
+        "authorizationStateClosed" => "closed",
+        "authorizationStateLoggingOut" => "logging_out",
+        "authorizationStateWaitRegistration" => "wait_registration",
+        "authorizationStateWaitOtherDeviceConfirmation" => "wait_other_device",
+        _ => "unknown",
+    };
+    serde_json::json!({
+        "type": "auth_state",
+        "state": state_str,
+    })
 }
