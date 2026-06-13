@@ -15,6 +15,9 @@
 #
 set -euo pipefail
 
+# 保存脚本启动时的源码目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # ── 颜色 ────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'
@@ -34,7 +37,6 @@ fail()  { echo -e "${RED}❌${RESET}  $*"; exit 1; }
 PREFIX="${PREFIX:-$HOME/.cargo/bin}"
 REPO_URL="https://github.com/zong1024/Telegram-CLI.git"
 TD_VERSION="1.8.37"
-TD_BUILD_DIR="/tmp/tdlib-build-${TD_VERSION}"
 
 # ── OS 检测 ──────────────────────────────────────────────────────────
 
@@ -76,16 +78,26 @@ install_pkg() {
 
 install_rust() {
     if check_cmd rustc && check_cmd cargo; then
-        local ver
-        ver=$(rustc --version | awk '{print $2}')
-        ok "Rust ${ver} 已安装"
+        ok "Rust $(rustc --version | awk '{print $2}') 已安装"
         return
     fi
 
     info "安装 Rust 工具链…"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
-    # shellcheck source=/dev/null
-    source "$HOME/.cargo/env"
+
+    # source cargo env（兼容 curl|bash 场景）
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env"
+    fi
+
+    # 确保 cargo 在 PATH 中
+    export PATH="$HOME/.cargo/bin:$PATH"
+
+    if ! check_cmd cargo; then
+        fail "Rust 安装失败，请手动安装: https://rustup.rs"
+    fi
+
     ok "Rust $(rustc --version | awk '{print $2}') 已安装"
 }
 
@@ -98,9 +110,9 @@ install_system_deps() {
 
     case "$OS" in
         arch)
-            check_cmd cmake  || pkgs+=(cmake)
-            check_cmd git    || pkgs+=(git)
-            check_cmd gcc    || pkgs+=(gcc)
+            check_cmd cmake      || pkgs+=(cmake)
+            check_cmd git        || pkgs+=(git)
+            check_cmd gcc        || pkgs+=(gcc)
             check_cmd pkg-config || pkgs+=(pkgconf)
             ;;
         debian)
@@ -127,7 +139,7 @@ install_system_deps() {
 # ── Step 3: TDLib / libtdjson ────────────────────────────────────────
 
 find_libtdjson() {
-    # 检查是否已经能找到 libtdjson
+    # pkg-config
     if check_cmd pkg-config && pkg-config --exists tdjson 2>/dev/null; then
         ok "libtdjson 已安装 (pkg-config)"
         return 0
@@ -145,7 +157,6 @@ find_libtdjson() {
     for p in "${search_paths[@]}"; do
         if [[ -f "$p" ]]; then
             ok "libtdjson 已安装: $p"
-            # 确保 linker 能找到
             local dir
             dir=$(dirname "$p")
             export LIBRARY_PATH="${dir}:${LIBRARY_PATH:-}"
@@ -164,7 +175,6 @@ install_tdlib_system() {
         arch)
             install_pkg "tdlib" && return 0 ;;
         debian)
-            # Debian/Ubuntu 没有官方 tdlib 包，尝试 libtd-dev
             if apt-cache show libtd-dev &>/dev/null 2>&1; then
                 install_pkg "libtd-dev" && return 0
             fi
@@ -195,26 +205,31 @@ build_tdlib_from_source() {
             brew install cmake gperf openssl ;;
     esac
 
-    mkdir -p "$TD_BUILD_DIR"
-    cd "$TD_BUILD_DIR"
+    local build_dir="/tmp/tdlib-build-${TD_VERSION}"
+    mkdir -p "$build_dir"
 
-    if [[ ! -d td ]]; then
-        git clone --depth 1 --branch "v${TD_VERSION}" https://github.com/tdlib/td.git
-    fi
+    # 在子 shell 中编译，不改变当前工作目录
+    (
+        cd "$build_dir"
 
-    cd td
-    mkdir -p build && cd build
+        if [[ ! -d td ]]; then
+            git clone --depth 1 --branch "v${TD_VERSION}" https://github.com/tdlib/td.git
+        fi
 
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DTD_ENABLE_JNI=OFF
+        cd td
+        mkdir -p build && cd build
 
-    local ncpu
-    ncpu=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-    cmake --build . --parallel "$ncpu"
+        cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DTD_ENABLE_JNI=OFF
 
-    ${sudo_needed} cmake --install .
+        local ncpu
+        ncpu=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+        cmake --build . --parallel "$ncpu"
+
+        ${sudo_needed} cmake --install .
+    )
 
     # 刷新 linker 缓存
     if command -v ldconfig &>/dev/null; then
@@ -253,20 +268,35 @@ setup_tdlib() {
 build_project() {
     info "编译 Telegram-CLI…"
 
-    local project_dir
-    # 如果在项目目录内，直接用；否则 clone
-    if [[ -f "Cargo.toml" ]] && grep -q "telegram-cli\|tg-tdjson" Cargo.toml 2>/dev/null; then
-        project_dir="."
-    else
-        project_dir="/tmp/Telegram-CLI"
-        if [[ ! -d "$project_dir" ]]; then
-            git clone --depth 1 "$REPO_URL" "$project_dir"
-        fi
-        cd "$project_dir"
-        git pull --ff-only 2>/dev/null || true
+    # 确定项目目录
+    local project_dir=""
+    if [[ -f "${SCRIPT_DIR}/Cargo.toml" ]] && grep -q "tg-tdjson" "${SCRIPT_DIR}/Cargo.toml" 2>/dev/null; then
+        project_dir="$SCRIPT_DIR"
+    elif [[ -f "Cargo.toml" ]] && grep -q "tg-tdjson" Cargo.toml 2>/dev/null; then
+        project_dir="$(pwd)"
     fi
 
-    cargo build --release 2>&1 | tail -3
+    if [[ -z "$project_dir" ]]; then
+        project_dir="/tmp/Telegram-CLI"
+        if [[ ! -d "$project_dir" ]]; then
+            info "克隆仓库…"
+            git clone --depth 1 "$REPO_URL" "$project_dir"
+        else
+            cd "$project_dir"
+            git pull --ff-only 2>/dev/null || true
+        fi
+    fi
+
+    info "项目目录: ${project_dir}"
+
+    # 在子 shell 中编译
+    (
+        cd "$project_dir"
+        cargo build --release 2>&1 | tail -5
+    )
+
+    # 保存项目路径供后续使用
+    PROJECT_DIR="$project_dir"
     ok "编译完成"
 }
 
@@ -276,39 +306,53 @@ install_binaries() {
     info "安装到 ${PREFIX}…"
     mkdir -p "$PREFIX"
 
+    local src_dir="${PROJECT_DIR:-$SCRIPT_DIR}/target/release"
     local bins=("tg" "tgcd")
+
     for bin in "${bins[@]}"; do
-        if [[ -f "target/release/${bin}" ]]; then
-            cp -f "target/release/${bin}" "${PREFIX}/${bin}"
+        if [[ -f "${src_dir}/${bin}" ]]; then
+            cp -f "${src_dir}/${bin}" "${PREFIX}/${bin}"
             chmod +x "${PREFIX}/${bin}"
             ok "${PREFIX}/${bin}"
         else
-            warn "未找到 target/release/${bin}"
+            warn "未找到 ${src_dir}/${bin}"
         fi
     done
 
     # 确保 PREFIX 在 PATH 中
-    if [[ ":$PATH:" != *":${PREFIX}:"* ]]; then
-        warn "${PREFIX} 不在 PATH 中"
+    if [[ ":$PATH:" == *":${PREFIX}:"* ]]; then
+        ok "${PREFIX} 已在 PATH 中"
+        return
+    fi
+
+    warn "${PREFIX} 不在 PATH 中"
+
+    # 自动添加到 shell 配置
+    local shell_rc=""
+    if [[ "$SHELL" == */zsh ]]; then
+        shell_rc="$HOME/.zshrc"
+    elif [[ "$SHELL" == */bash ]]; then
+        shell_rc="$HOME/.bashrc"
+    fi
+
+    if [[ -n "$shell_rc" ]] && [[ -f "$shell_rc" ]]; then
+        if ! grep -q "export PATH=.*${PREFIX}" "$shell_rc" 2>/dev/null; then
+            {
+                echo ""
+                echo "# Telegram-CLI"
+                echo "export PATH=\"${PREFIX}:\$PATH\""
+            } >> "$shell_rc"
+            info "已添加到 ${shell_rc}"
+            echo ""
+            echo "  运行以下命令使 PATH 生效:"
+            echo "    source ${shell_rc}"
+            echo ""
+        fi
+    else
         echo ""
-        echo "  添加到 shell 配置:"
+        echo "  手动添加 PATH:"
         echo "    export PATH=\"${PREFIX}:\$PATH\""
         echo ""
-
-        # 自动添加到常见 shell 配置
-        local shell_rc=""
-        if [[ -n "${ZSH_VERSION:-}" ]] || [[ -f "$HOME/.zshrc" ]] && [[ "$SHELL" == */zsh ]]; then
-            shell_rc="$HOME/.zshrc"
-        elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
-            shell_rc="$HOME/.bashrc"
-        fi
-
-        if [[ -n "$shell_rc" ]] && [[ -f "$shell_rc" ]]; then
-            if ! grep -q "export PATH=.*${PREFIX}" "$shell_rc" 2>/dev/null; then
-                echo "export PATH=\"${PREFIX}:\$PATH\"" >> "$shell_rc"
-                info "已添加到 ${shell_rc}（重启 shell 生效）"
-            fi
-        fi
     fi
 }
 
@@ -320,7 +364,6 @@ setup_systemd() {
         return
     fi
 
-    # 检查 systemd 是否可用
     if ! check_cmd systemctl; then
         warn "systemctl 未找到，跳过 systemd 服务安装"
         return
