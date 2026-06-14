@@ -180,8 +180,8 @@ fn handle_event(msg: &ServerMessage, app: &mut App) {
     match msg {
         ServerMessage::Response(resp) => {
             if let Some(result) = &resp.result {
+                // Chat list: handler returns array of Chat objects
                 if let Some(arr) = result.as_array() {
-                    // Detect if it's dialogs or messages
                     if arr.first().map(|v| v.get("title").is_some()).unwrap_or(false) {
                         app.dialogs.clear();
                         for item in arr {
@@ -191,21 +191,24 @@ fn handle_event(msg: &ServerMessage, app: &mut App) {
                             app.dialogs.push((id, title, unread));
                         }
                         app.status = format!("{} chats", app.dialogs.len());
-                    } else {
-                        app.messages.clear();
-                        for m in arr {
-                            let id = m["id"].as_i64().unwrap_or(0);
-                            let sender = m["sender_id"]["user_id"].as_i64()
-                                .map(|u| format!("user#{u}"))
-                                .unwrap_or_else(|| "system".into());
-                            let text = m["content"]["text"]["text"]
-                                .as_str()
-                                .or_else(|| m["content"]["caption"]["text"].as_str())
-                                .unwrap_or("[media]")
-                                .to_string();
-                            let ts = m["date"].as_i64().unwrap_or(0);
-                            app.messages.push((id, sender, text, fmt_time(ts)));
-                        }
+                    }
+                }
+
+                // Messages: TDLib getChatHistory returns { "messages": [...] }
+                if let Some(msgs) = result.get("messages").and_then(|v| v.as_array()) {
+                    app.messages.clear();
+                    for m in msgs {
+                        let id = m["id"].as_i64().unwrap_or(0);
+                        let sender = m["sender_id"]["user_id"].as_i64()
+                            .map(|u| format!("user#{u}"))
+                            .unwrap_or_else(|| "system".into());
+                        let text = m["content"]["text"]["text"]
+                            .as_str()
+                            .or_else(|| m["content"]["caption"]["text"].as_str())
+                            .unwrap_or("[media]")
+                            .to_string();
+                        let ts = m["date"].as_i64().unwrap_or(0);
+                        app.messages.push((id, sender, text, fmt_time(ts)));
                     }
                 }
             }
