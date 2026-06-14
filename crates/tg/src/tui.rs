@@ -197,11 +197,17 @@ fn handle_event(msg: &ServerMessage, app: &mut App) {
                 // Messages: TDLib getChatHistory returns { "messages": [...] }
                 if let Some(msgs) = result.get("messages").and_then(|v| v.as_array()) {
                     app.messages.clear();
+                    app.status = format!("{} messages", msgs.len());
                     for m in msgs {
                         let id = m["id"].as_i64().unwrap_or(0);
-                        let sender = m["sender_id"]["user_id"].as_i64()
-                            .map(|u| format!("user#{u}"))
-                            .unwrap_or_else(|| "system".into());
+                        let is_out = m["is_outgoing"].as_bool().unwrap_or(false);
+                        let sender = if is_out {
+                            "Me".to_string()
+                        } else {
+                            m["sender_id"]["user_id"].as_i64()
+                                .map(|u| format!("user#{u}"))
+                                .unwrap_or_else(|| "system".into())
+                        };
                         let text = m["content"]["text"]["text"]
                             .as_str()
                             .or_else(|| m["content"]["caption"]["text"].as_str())
@@ -210,6 +216,11 @@ fn handle_event(msg: &ServerMessage, app: &mut App) {
                         let ts = m["date"].as_i64().unwrap_or(0);
                         app.messages.push((id, sender, text, fmt_time(ts)));
                     }
+                } else {
+                    let keys: Vec<String> = result.as_object()
+                        .map(|o| o.keys().cloned().collect())
+                        .unwrap_or_default();
+                    app.status = format!("resp keys: {:?}", keys);
                 }
             }
             if let Some(err) = &resp.error {
@@ -263,9 +274,10 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Messages
     let msgs: Vec<Line> = app.messages.iter().map(|(_, sender, text, time)| {
+        let sender_color = if sender == "Me" { Color::Green } else { Color::Cyan };
         Line::from(vec![
             Span::styled(format!("[{time}] "), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{sender}: "), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{sender}: "), Style::default().fg(sender_color).add_modifier(Modifier::BOLD)),
             Span::raw(text.as_str()),
         ])
     }).collect();
