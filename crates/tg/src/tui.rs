@@ -170,7 +170,7 @@ async fn load_msgs(app: &mut App, writer: &mut IpcWriter) -> Result<()> {
         writer.send_request(&tg_ipc::protocol::Request {
             id: uuid::Uuid::new_v4().to_string(),
             method: methods::GET_MESSAGES.to_string(),
-            params: serde_json::json!({"chat_id": chat, "limit": 50}),
+            params: serde_json::json!({"chat_id": chat, "limit": 200}),
         }).await?;
     }
     Ok(())
@@ -210,9 +210,9 @@ fn handle_event(msg: &ServerMessage, app: &mut App) {
                         };
                         let text = m["content"]["text"]["text"]
                             .as_str()
-                            .or_else(|| m["content"]["caption"]["text"].as_str())
-                            .unwrap_or("[media]")
-                            .to_string();
+                            .map(|s| s.to_string())
+                            .or_else(|| m["content"]["caption"]["text"].as_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| detect_content_label(m));
                         let ts = m["date"].as_i64().unwrap_or(0);
                         app.messages.push((id, sender, text, fmt_time(ts)));
                     }
@@ -305,4 +305,38 @@ fn fmt_time(ts: i64) -> String {
     let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
     let dt: chrono::DateTime<chrono::Utc> = dt.into();
     dt.format("%H:%M").to_string()
+}
+
+fn detect_content_label(m: &serde_json::Value) -> String {
+    let msg_type = m["content"]["@type"].as_str().unwrap_or("");
+    match msg_type {
+        "messagePhoto" => "📷 photo".into(),
+        "messageVideo" => "🎬 video".into(),
+        "messageVideoNote" => "🎥 video note".into(),
+        "messageAnimation" => "🎞️ gif".into(),
+        "messageSticker" => {
+            let emoji = m["content"]["sticker"]["emoji"].as_str().unwrap_or("🏷️");
+            format!("{emoji} sticker")
+        }
+        "messageDocument" => {
+            let name = m["content"]["document"]["file_name"].as_str().unwrap_or("file");
+            format!("📄 {name}")
+        }
+        "messageVoiceNote" => "🎤 voice".into(),
+        "messageAudio" => {
+            let title = m["content"]["audio"]["title"].as_str().unwrap_or("audio");
+            format!("🎵 {title}")
+        }
+        "messageLocation" => "📍 location".into(),
+        "messageContact" => "👤 contact".into(),
+        "messagePoll" => {
+            let question = m["content"]["poll"]["question"]["text"].as_str().unwrap_or("poll");
+            format!("📊 {question}")
+        }
+        "messageCall" => "📞 call".into(),
+        "messageGame" => "🎮 game".into(),
+        "messageInvoice" => "💰 invoice".into(),
+        "" => "[empty]".into(),
+        _ => format!("[{}]", msg_type.strip_prefix("message").unwrap_or(msg_type)),
+    }
 }
