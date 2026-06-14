@@ -194,11 +194,15 @@ fn handle_event(msg: &ServerMessage, app: &mut App) {
                     } else {
                         app.messages.clear();
                         for m in arr {
-                            let id = m["message_id"].as_i64().unwrap_or(0);
-                            let sender = m["sender_id"].as_i64()
+                            let id = m["id"].as_i64().unwrap_or(0);
+                            let sender = m["sender_id"]["user_id"].as_i64()
                                 .map(|u| format!("user#{u}"))
-                                .unwrap_or("?".into());
-                            let text = m["text"].as_str().unwrap_or("[media]").to_string();
+                                .unwrap_or_else(|| "system".into());
+                            let text = m["content"]["text"]["text"]
+                                .as_str()
+                                .or_else(|| m["content"]["caption"]["text"].as_str())
+                                .unwrap_or("[media]")
+                                .to_string();
                             let ts = m["date"].as_i64().unwrap_or(0);
                             app.messages.push((id, sender, text, fmt_time(ts)));
                         }

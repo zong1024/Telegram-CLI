@@ -59,7 +59,25 @@ async fn dispatch(method: &str, params: &JsonValue, state: &AppState) -> Result<
                 "chat_list": {"@type": "chatListMain"},
                 "limit": limit
             })).await?;
-            Ok(resp)
+
+            // getChats returns { "chat_ids": [id1, id2, ...] }
+            // Expand each id into full chat info
+            if let Some(ids) = resp.get("chat_ids").and_then(|v| v.as_array()) {
+                let mut chats = Vec::new();
+                for id in ids {
+                    if let Some(chat_id) = id.as_i64() {
+                        if let Ok(chat) = tdlib::query(&state.td, serde_json::json!({
+                            "@type": "getChat",
+                            "chat_id": chat_id
+                        })).await {
+                            chats.push(chat);
+                        }
+                    }
+                }
+                Ok(serde_json::Value::Array(chats))
+            } else {
+                Ok(resp)
+            }
         }
 
         methods::GET_MESSAGES => {
