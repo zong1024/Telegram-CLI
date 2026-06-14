@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde_json::json;
 use tg_core::config::TgConfig;
 use tg_ipc::client::IpcClient;
-use tg_ipc::protocol::{methods, ServerMessage};
+use tg_ipc::protocol::ServerMessage;
 
 pub async fn run() -> Result<()> {
     let config = TgConfig::load()?;
@@ -15,42 +15,67 @@ pub async fn run() -> Result<()> {
     }
 
     println!("🔐  Logging in…\n");
+
     let mut client = IpcClient::connect(socket).await?;
 
-    // Check status
-    let _status = client.call(methods::GET_STATUS, json!({})).await?;
-
-    // Trigger auth state machine — TDLib will respond with current auth state
-    client.send_request(&tg_ipc::protocol::Request {
-        id: uuid::Uuid::new_v4().to_string(),
-        method: "auth_trigger".to_string(),
-        params: json!({}),
-    }).await?;
+    // Trigger auth state machine
+    client.send_raw(serde_json::json!({
+        "id": "login-trigger",
+        "method": "auth_trigger",
+        "params": {}
+    })).await?;
 
     println!("⏳  Waiting for auth events…\n");
 
+    // Single event loop — handles auth events and user input
     loop {
         let msg = client.read_message().await?;
         match msg {
             ServerMessage::AuthState(auth) => match auth.state.as_str() {
-                "ready" => { println!("✅  Logged in!"); break; }
+                "ready" => {
+                    println!("✅  Logged in!");
+                    break;
+                }
                 "wait_phone" => {
                     let phone = input("📱  Phone number")?;
-                    client.call(methods::AUTH_PHONE, json!({"phone": phone})).await?;
+                    client.send_raw(serde_json::json!({
+                        "id": "login-phone",
+                        "method": "auth_phone",
+                        "params": { "phone": phone }
+                    })).await?;
                 }
                 "wait_code" => {
                     let code = input("🔑  Code")?;
-                    client.call(methods::AUTH_CODE, json!({"code": code})).await?;
+                    client.send_raw(serde_json::json!({
+                        "id": "login-code",
+                        "method": "auth_code",
+                        "params": { "code": code }
+                    })).await?;
                 }
                 "wait_password" => {
                     let pw = input("🔒  2FA password")?;
-                    client.call(methods::AUTH_PASSWORD, json!({"password": pw})).await?;
+                    client.send_raw(serde_json::json!({
+                        "id": "login-pw",
+                        "method": "auth_password",
+                        "params": { "password": pw }
+                    })).await?;
                 }
-                other => println!("   Auth: {other}"),
+                other => {
+                    println!("   Auth state: {other}");
+                }
             },
-            _ => {}
+            ServerMessage::Response(resp) => {
+                // Ignore login ack responses
+                if let Some(err) = resp.error {
+                    println!("❌  Error: {}", err.message);
+                }
+            }
+            ServerMessage::Event(_) => {
+                // Ignore other events during login
+            }
         }
     }
+
     Ok(())
 }
 

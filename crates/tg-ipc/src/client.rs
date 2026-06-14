@@ -68,6 +68,13 @@ impl IpcClient {
         Ok(())
     }
 
+    /// Send a raw JSON value (for special cases like login flow).
+    pub async fn send_raw(&mut self, value: JsonValue) -> Result<()> {
+        let payload = serde_json::to_vec(&value)?;
+        self.framed.send(Bytes::from(payload)).await?;
+        Ok(())
+    }
+
     pub async fn read_message(&mut self) -> Result<ServerMessage> {
         let frame = self
             .framed
