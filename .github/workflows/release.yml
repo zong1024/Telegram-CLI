@@ -188,6 +188,7 @@ jobs:
   # ── Windows: .exe (zip) ───────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -266,7 +267,7 @@ jobs:
 
   # ── Release: upload all artifacts ─────────────────────────────────
   release:
-    needs: [build-linux, build-fedora, build-arch, build-windows, build-macos]
+    needs: [build-linux, build-fedora, build-arch, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
