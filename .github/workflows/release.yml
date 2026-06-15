@@ -67,16 +67,18 @@ jobs:
       - name: Create .deb
         run: |
           VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')
-          DEB_DIR=deb-pkg/telegram-cli
+          PKGROOT=$(pwd)/deb-pkg
+          DEB_DIR="$PKGROOT/telegram-cli"
           mkdir -p "$DEB_DIR/DEBIAN" "$DEB_DIR/usr/bin" "$DEB_DIR/usr/lib/systemd/user" "$DEB_DIR/usr/share/doc/telegram-cli"
           cp target/release/tg target/release/tgcd "$DEB_DIR/usr/bin/"
           cp scripts/tgcd.service "$DEB_DIR/usr/lib/systemd/user/"
           cp README.md LICENSE docs/tutorial.md "$DEB_DIR/usr/share/doc/telegram-cli/"
           printf "Package: telegram-cli\nVersion: %s\nSection: net\nPriority: optional\nArchitecture: amd64\nMaintainer: zong1024 <zong1024@gmail.com>\nDepends: libc6, libssl3\nDescription: Telegram CLI\n TDLib + Rust daemon + TUI/CLI Telegram client.\n" "$VERSION" > "$DEB_DIR/DEBIAN/control"
-          echo "2.0" > deb-pkg/debian-binary
-          (cd "$DEB_DIR" && tar -czf ../../control.tar.gz DEBIAN && tar -czf ../../data.tar.gz usr)
-          (cd deb-pkg && ar rcs "../dist/telegram-cli_${VERSION}_amd64.deb" debian-binary control.tar.gz data.tar.gz)
-          rm -rf deb-pkg
+          echo "2.0" > "$PKGROOT/debian-binary"
+          tar -czf "$PKGROOT/control.tar.gz" -C "$DEB_DIR" DEBIAN
+          tar -czf "$PKGROOT/data.tar.gz" -C "$DEB_DIR" usr
+          ar rcs "dist/telegram-cli_${VERSION}_amd64.deb" "$PKGROOT/debian-binary" "$PKGROOT/control.tar.gz" "$PKGROOT/data.tar.gz"
+          rm -rf "$PKGROOT"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
