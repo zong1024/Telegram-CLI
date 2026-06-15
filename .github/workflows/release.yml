@@ -22,7 +22,24 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake gperf zlib1g-dev libssl-dev pkg-config libtd-dev
+          sudo apt-get install -y cmake gperf zlib1g-dev libssl-dev
+
+      - name: Cache TDLib
+        id: cache-tdlib
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/libtdjson*
+          key: tdlib-${{ env.TDLIB_VERSION }}
+
+      - name: Build TDLib
+        if: steps.cache-tdlib.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "v${{ env.TDLIB_VERSION }}" https://github.com/tdlib/td.git /tmp/td
+          cd /tmp/td && mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DTD_ENABLE_JNI=OFF
+          cmake --build . --parallel $(nproc)
+          sudo cmake --install .
+          sudo ldconfig
 
       - uses: dtolnay/rust-toolchain@stable
 
