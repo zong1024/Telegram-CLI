@@ -31,7 +31,7 @@ jobs:
           sudo apt-get install -y cmake gperf zlib1g-dev libssl-dev libdbus-1-dev
           git clone --depth 1 --branch "v${{ env.TDLIB_VERSION }}" https://github.com/tdlib/td.git /tmp/td
           cd /tmp/td && mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DTD_ENABLE_JNI=OFF
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DTD_ENABLE_JNI=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           cmake --build . --parallel $(nproc)
           sudo cmake --install .
           sudo ldconfig
