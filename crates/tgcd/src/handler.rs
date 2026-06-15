@@ -13,6 +13,7 @@ use crate::tdlib;
 pub struct AppState {
     pub config: TgConfig,
     pub td: tg_tdjson::TdClient,
+    #[allow(dead_code)]
     pub cache: Cache,
     pub updates_tx: broadcast::Sender<JsonValue>,
 }

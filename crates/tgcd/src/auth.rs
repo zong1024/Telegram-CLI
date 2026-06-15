@@ -6,6 +6,7 @@ use tg_core::config::TgConfig;
 use tg_core::models::AuthState;
 
 /// Wait for TDLib authorization.
+#[allow(dead_code)]
 pub async fn ensure_authorized(td: &tg_tdjson::TdClient, _config: &TgConfig) -> bool {
     let mut rx = tg_tdjson::subscribe_updates();
 

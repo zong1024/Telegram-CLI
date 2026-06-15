@@ -73,10 +73,9 @@ pub async fn run() -> Result<()> {
     // Background task: read all server messages and forward to UI
     let (msg_tx, mut msg_rx) = mpsc::channel::<ServerMessage>(128);
     tokio::spawn(async move {
-        loop {
-            match reader.read_message().await {
-                Ok(msg) => { if msg_tx.send(msg).await.is_err() { break; } }
-                Err(_) => break,
+        while let Ok(msg) = reader.read_message().await {
+            if msg_tx.send(msg).await.is_err() {
+                break;
             }
         }
     });

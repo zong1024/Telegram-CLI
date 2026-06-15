@@ -1,5 +1,7 @@
 //! SQLite cache for chats, messages, and downloads.
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -77,6 +79,7 @@ impl Cache {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_message(
         &self, chat_id: i64, msg_id: i64, sender_id: Option<i64>,
         text: Option<&str>, date: i64, is_outgoing: bool, content_type: &str,

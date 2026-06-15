@@ -1,7 +1,6 @@
 //! `tg login` — interactive login via tgcd.
 
 use anyhow::Result;
-use serde_json::json;
 use tg_core::config::TgConfig;
 use tg_ipc::client::IpcClient;
 use tg_ipc::protocol::ServerMessage;

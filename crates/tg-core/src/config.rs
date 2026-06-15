@@ -5,7 +5,7 @@ use crate::error::TgError;
 
 // ── Config root ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TgConfig {
     #[serde(default)]
     pub telegram: TelegramConfig,
@@ -19,7 +19,7 @@ pub struct TgConfig {
     pub ipc: IpcConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelegramConfig {
     pub api_id: i32,
     pub api_hash: String,
@@ -123,12 +123,6 @@ fn default_page_size() -> usize {
     50
 }
 
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self { api_id: 0, api_hash: String::new(), phone: String::new() }
-    }
-}
-
 impl Default for TdlibConfig {
     fn default() -> Self {
         Self {
@@ -167,18 +161,6 @@ impl Default for TuiConfig {
 impl Default for IpcConfig {
     fn default() -> Self {
         Self { socket_path: default_socket_path() }
-    }
-}
-
-impl Default for TgConfig {
-    fn default() -> Self {
-        Self {
-            telegram: TelegramConfig::default(),
-            tdlib: TdlibConfig::default(),
-            proxy: ProxyConfig::default(),
-            tui: TuiConfig::default(),
-            ipc: IpcConfig::default(),
-        }
     }
 }
 

@@ -75,8 +75,10 @@ async fn process_event(ev: &JsonValue, cache: &Cache) -> anyhow::Result<()> {
             let is_downloaded = local["is_downloading_completed"].as_bool().unwrap_or(false);
             let path = local["path"].as_str();
 
-            if is_downloaded && path.is_some() {
-                debug!("file {file_id} downloaded to {}", path.unwrap());
+            if is_downloaded {
+                if let Some(path) = path {
+                    debug!("file {file_id} downloaded to {path}");
+                }
             }
         }
         _ => {}

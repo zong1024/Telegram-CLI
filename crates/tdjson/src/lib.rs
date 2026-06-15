@@ -37,7 +37,6 @@ extern "C" {
     fn td_execute(request: *const c_char) -> *const c_char;
 
     fn td_set_log_verbosity_level(level: c_int);
-    fn td_set_log_fatal_error_callback(callback: Option<unsafe extern "C" fn(*const c_char)>);
 }
 
 // ── Low-level helpers ──────────────────────────────────────────────
@@ -150,6 +149,7 @@ pub struct TdClient {
 
 impl TdClient {
     /// Create a new TDLib client (calls `td_create_client_id`).
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let client_id = unsafe { td_create_client_id() };
         Self { client_id }
