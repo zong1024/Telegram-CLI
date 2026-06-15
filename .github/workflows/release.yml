@@ -66,32 +66,17 @@ jobs:
 
       - name: Create .deb
         run: |
-          DEB_DIR=dist/deb/telegram-cli
-          mkdir -p "$DEB_DIR/DEBIAN" \
-                   "$DEB_DIR/usr/bin" \
-                   "$DEB_DIR/usr/lib/systemd/user" \
-                   "$DEB_DIR/usr/share/doc/telegram-cli"
-
+          VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')
+          DEB_DIR=deb-pkg/telegram-cli
+          mkdir -p "$DEB_DIR/DEBIAN" "$DEB_DIR/usr/bin" "$DEB_DIR/usr/lib/systemd/user" "$DEB_DIR/usr/share/doc/telegram-cli"
           cp target/release/tg target/release/tgcd "$DEB_DIR/usr/bin/"
           cp scripts/tgcd.service "$DEB_DIR/usr/lib/systemd/user/"
-          cp README.md LICENSE "$DEB_DIR/usr/share/doc/telegram-cli/"
-          cp docs/tutorial.md "$DEB_DIR/usr/share/doc/telegram-cli/"
-
-          cat > "$DEB_DIR/DEBIAN/control" << EOF
-          Package: telegram-cli
-          Version: $(echo ${{ github.ref_name }} | sed 's/^v//')
-          Section: net
-          Priority: optional
-          Architecture: amd64
-          Maintainer: zong1024 <zong1024@gmail.com>
-          Depends: libc6, libssl3, libtdjson1.8
-          Description: Telegram CLI - terminal Telegram client
-           TDLib + Rust daemon + TUI/CLI full-featured Telegram client.
-          EOF
-
-          echo "2.0" > dist/deb/debian-binary
-          cd dist/deb/telegram-cli && tar -czf ../control.tar.gz DEBIAN && tar -czf ../data.tar.gz usr
-          cd dist/deb && ar rcs ../telegram-cli_$(echo ${{ github.ref_name }} | sed 's/^v//')_amd64.deb debian-binary control.tar.gz data.tar.gz
+          cp README.md LICENSE docs/tutorial.md "$DEB_DIR/usr/share/doc/telegram-cli/"
+          printf "Package: telegram-cli\nVersion: %s\nSection: net\nPriority: optional\nArchitecture: amd64\nMaintainer: zong1024 <zong1024@gmail.com>\nDepends: libc6, libssl3\nDescription: Telegram CLI\n TDLib + Rust daemon + TUI/CLI Telegram client.\n" "$VERSION" > "$DEB_DIR/DEBIAN/control"
+          echo "2.0" > deb-pkg/debian-binary
+          (cd "$DEB_DIR" && tar -czf ../../control.tar.gz DEBIAN && tar -czf ../../data.tar.gz usr)
+          (cd deb-pkg && ar rcs "../dist/telegram-cli_${VERSION}_amd64.deb" debian-binary control.tar.gz data.tar.gz)
+          rm -rf deb-pkg
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -105,55 +90,6 @@ jobs:
           name: linux-tarball
           path: dist/*.tar.gz
 
-  # ── Linux ARM64: .tar.gz ──────────────────────────────────────────
-  build-linux-arm64:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install cross-compile tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake gperf zlib1g-dev libssl-dev pkg-config \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Install TDLib for ARM64
-        run: |
-          git clone --depth 1 --branch "v${{ env.TDLIB_VERSION }}" https://github.com/tdlib/td.git /tmp/td
-          cd /tmp/td && mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release \
-                   -DCMAKE_INSTALL_PREFIX=/tmp/tdlib-arm64 \
-                   -DCMAKE_TOOLCHAIN_FILE=/dev/null \
-                   -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-                   -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
-                   -DTD_ENABLE_JNI=OFF
-          cmake --build . --parallel $(nproc)
-          cmake --install .
-
-      - name: Build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          LIBTDJSON_PATH: /tmp/tdlib-arm64/lib/libtdjson.so
-        run: cargo build --release --target aarch64-unknown-linux-gnu
-
-      - name: Create tar.gz
-        run: |
-          mkdir -p dist
-          aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/tg \
-                                   target/aarch64-unknown-linux-gnu/release/tgcd
-          tar -czf dist/telegram-cli_${{ github.ref_name }}_linux_arm64.tar.gz \
-            -C target/aarch64-unknown-linux-gnu/release tg tgcd
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-arm64-tarball
-          path: dist/*.tar.gz
-
   # ── Fedora: .rpm ──────────────────────────────────────────────────
   build-fedora:
     runs-on: ubuntu-22.04
@@ -164,7 +100,16 @@ jobs:
       - name: Install dependencies
         run: |
           dnf install -y cargo cmake gcc gcc-c++ pkgconf zlib-devel openssl-devel \
-            tdlib-devel rpm-build tar
+            dbus-devel rpm-build tar git gperf
+
+      - name: Build TDLib
+        run: |
+          git clone --depth 1 --branch "v${{ env.TDLIB_VERSION }}" https://github.com/tdlib/td.git /tmp/td
+          cd /tmp/td && mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DTD_ENABLE_JNI=OFF
+          cmake --build . --parallel $(nproc)
+          cmake --install .
+          ldconfig
 
       - name: Build
         run: cargo build --release
@@ -207,7 +152,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm base-devel cmake gperf zlib openssl git rust
+          pacman -S --needed --noconfirm base-devel cmake gperf zlib openssl git rust dbus
 
       - name: Install TDLib from AUR-like build
         run: |
@@ -314,7 +259,7 @@ jobs:
 
   # ── Release: upload all artifacts ─────────────────────────────────
   release:
-    needs: [build-linux, build-linux-arm64, build-fedora, build-arch, build-windows, build-macos]
+    needs: [build-linux, build-fedora, build-arch, build-windows, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
