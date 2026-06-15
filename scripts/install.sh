@@ -41,7 +41,10 @@ TD_VERSION="1.8.0"
 # ── OS 检测 ──────────────────────────────────────────────────────────
 
 detect_os() {
-    if [[ "$OSTYPE" == "darwin"* ]]; then
+    if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]; then
+        OS="termux"
+        PKG_MGR="pkg"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
         OS="macos"
         PKG_MGR="brew"
     elif command -v pacman &>/dev/null; then
@@ -50,6 +53,9 @@ detect_os() {
     elif command -v apt &>/dev/null; then
         OS="debian"
         PKG_MGR="apt"
+    elif command -v dnf &>/dev/null; then
+        OS="fedora"
+        PKG_MGR="dnf"
     else
         OS="unknown"
         PKG_MGR=""
@@ -121,6 +127,17 @@ install_system_deps() {
             check_cmd gcc        || pkgs+=(build-essential)
             check_cmd pkg-config || pkgs+=(pkg-config)
             ;;
+        fedora)
+            check_cmd cmake      || pkgs+=(cmake)
+            check_cmd git        || pkgs+=(git)
+            check_cmd gcc        || pkgs+=(gcc)
+            check_cmd pkg-config || pkgs+=(pkgconf)
+            ;;
+        termux)
+            check_cmd cmake      || pkgs+=(cmake)
+            check_cmd git        || pkgs+=(git)
+            check_cmd pkg-config || pkgs+=(pkg-config)
+            ;;
         macos)
             check_cmd cmake || pkgs+=(cmake)
             check_cmd git   || pkgs+=(git)
@@ -183,9 +200,14 @@ install_tdlib_system() {
             warn "Arch 需要 AUR 助手 (yay/paru) 或从源码编译 TDLib"
             return 1
             ;;
-        debian)
+        debian|termux)
             if apt-cache show libtd-dev &>/dev/null 2>&1; then
                 install_pkg "libtd-dev" && return 0
+            fi
+            ;;
+        fedora)
+            if dnf list tdlib-devel &>/dev/null 2>&1; then
+                install_pkg "tdlib-devel" && return 0
             fi
             ;;
         macos)
@@ -211,6 +233,10 @@ build_tdlib_from_source() {
         debian)
             sudo apt-get update -qq
             sudo apt-get install -y -qq cmake gperf zlib1g-dev libssl-dev ;;
+        fedora)
+            sudo dnf install -y cmake gperf zlib-devel openssl-devel ;;
+        termux)
+            pkg install -y cmake gperf openssl libffi ;;
         macos)
             brew install cmake gperf openssl ;;
     esac

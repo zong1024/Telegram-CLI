@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use tg_core::config::TgConfig;
 
 #[derive(Parser)]
-#[command(name = "tgcd", about = "Telegram CLI daemon")]
+#[command(name = "tgcd", about = "Telegram CLI daemon", version)]
 struct Args {
     #[arg(short, long)]
     config: Option<String>,

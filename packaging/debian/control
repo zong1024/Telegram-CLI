@@ -1,0 +1,18 @@
+Source: telegram-cli
+Section: net
+Priority: optional
+Maintainer: zong1024 <zong1024@gmail.com>
+Build-Depends: debhelper (>= 12), cargo, cmake, libtd-dev, pkg-config
+Standards-Version: 4.6.0
+Homepage: https://github.com/zong1024/Telegram-CLI
+
+Package: telegram-cli
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Telegram CLI - terminal Telegram client
+ TDLib + Rust daemon + TUI/CLI — a full-featured Telegram client
+ for the terminal. Features include message management, channel
+ monitoring, file operations, and a ratatui-powered TUI interface.
+ .
+ Commands: tg (CLI + TUI), tgcd (daemon)
+ Communicates over Unix socket with LengthDelimitedCodec framing.

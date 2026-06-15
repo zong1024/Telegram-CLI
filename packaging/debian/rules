@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_install:
+	install -Dm755 target/release/tg   debian/telegram-cli/usr/bin/tg
+	install -Dm755 target/release/tgcd debian/telegram-cli/usr/bin/tgcd
+	install -Dm644 scripts/tgcd.service debian/telegram-cli/usr/lib/systemd/user/tgcd.service
+	install -Dm644 LICENSE debian/telegram-cli/usr/share/doc/telegram-cli/LICENSE
+	install -Dm644 README.md debian/telegram-cli/usr/share/doc/telegram-cli/README.md
+	install -Dm644 docs/tutorial.md debian/telegram-cli/usr/share/doc/telegram-cli/tutorial.md
+
+override_dh_auto_test:
+	cargo test --release || true
+
+override_dh_auto_clean:
+	cargo clean || true
+	dh_auto_clean

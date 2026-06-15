@@ -1,0 +1,44 @@
+# Maintainer: zong1024 <zong1024@gmail.com>
+pkgname=telegram-cli
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="TDLib + Rust daemon + TUI/CLI — a full-featured Telegram client for the terminal"
+arch=('x86_64' 'aarch64')
+url="https://github.com/zong1024/Telegram-CLI"
+license=('MIT')
+depends=('tdlib' 'gcc-libs')
+makedepends=('cargo' 'cmake' 'git')
+optdepends=(
+    'systemd: for tgcd user service'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/zong1024/Telegram-CLI/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    # Cargo will download dependencies at build time
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --release --locked
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --release
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm755 "target/release/tg"   "$pkgdir/usr/bin/tg"
+    install -Dm755 "target/release/tgcd" "$pkgdir/usr/bin/tgcd"
+
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "docs/tutorial.md" "$pkgdir/usr/share/doc/$pkgname/tutorial.md"
+
+    # Systemd user service
+    install -Dm644 "scripts/tgcd.service" "$pkgdir/usr/lib/systemd/user/tgcd.service"
+}
