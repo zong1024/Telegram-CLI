@@ -199,7 +199,12 @@ jobs:
           C:\vcpkg\bootstrap-vcpkg.bat
 
       - name: Install TDLib via vcpkg
-        run: C:\vcpkg\vcpkg install tdlib:x64-windows
+        run: |
+          C:\vcpkg\vcpkg install tdlib:x64-windows
+          # Clean up build trees to free disk space
+          Remove-Item -Recurse -Force C:\vcpkg\buildtrees -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force C:\vcpkg\downloads -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force C:\vcpkg\packages -ErrorAction SilentlyContinue
 
       - name: Cache cargo
         uses: actions/cache@v4
