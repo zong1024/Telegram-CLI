@@ -1,0 +1,320 @@
+name: Build Release Packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TDLIB_VERSION: "1.8.63"
+
+jobs:
+  # ── Linux x86_64: .deb + .tar.gz ──────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gperf zlib1g-dev libssl-dev pkg-config libtd-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Strip binaries
+        run: strip target/release/tg target/release/tgcd
+
+      - name: Create tar.gz
+        run: |
+          mkdir -p dist
+          tar -czf dist/telegram-cli_${{ github.ref_name }}_linux_amd64.tar.gz \
+            -C target/release tg tgcd
+
+      - name: Create .deb
+        run: |
+          DEB_DIR=dist/deb/telegram-cli
+          mkdir -p "$DEB_DIR/DEBIAN" \
+                   "$DEB_DIR/usr/bin" \
+                   "$DEB_DIR/usr/lib/systemd/user" \
+                   "$DEB_DIR/usr/share/doc/telegram-cli"
+
+          cp target/release/tg target/release/tgcd "$DEB_DIR/usr/bin/"
+          cp scripts/tgcd.service "$DEB_DIR/usr/lib/systemd/user/"
+          cp README.md LICENSE "$DEB_DIR/usr/share/doc/telegram-cli/"
+          cp docs/tutorial.md "$DEB_DIR/usr/share/doc/telegram-cli/"
+
+          cat > "$DEB_DIR/DEBIAN/control" << EOF
+          Package: telegram-cli
+          Version: $(echo ${{ github.ref_name }} | sed 's/^v//')
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: zong1024 <zong1024@gmail.com>
+          Depends: libc6, libssl3, libtdjson1.8
+          Description: Telegram CLI - terminal Telegram client
+           TDLib + Rust daemon + TUI/CLI full-featured Telegram client.
+          EOF
+
+          echo "2.0" > dist/deb/debian-binary
+          cd dist/deb/telegram-cli && tar -czf ../control.tar.gz DEBIAN && tar -czf ../data.tar.gz usr
+          cd dist/deb && ar rcs ../telegram-cli_$(echo ${{ github.ref_name }} | sed 's/^v//')_amd64.deb debian-binary control.tar.gz data.tar.gz
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*.deb
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: dist/*.tar.gz
+
+  # ── Linux ARM64: .tar.gz ──────────────────────────────────────────
+  build-linux-arm64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compile tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gperf zlib1g-dev libssl-dev pkg-config \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install TDLib for ARM64
+        run: |
+          git clone --depth 1 --branch "v${{ env.TDLIB_VERSION }}" https://github.com/tdlib/td.git /tmp/td
+          cd /tmp/td && mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+                   -DCMAKE_INSTALL_PREFIX=/tmp/tdlib-arm64 \
+                   -DCMAKE_TOOLCHAIN_FILE=/dev/null \
+                   -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+                   -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+                   -DTD_ENABLE_JNI=OFF
+          cmake --build . --parallel $(nproc)
+          cmake --install .
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          LIBTDJSON_PATH: /tmp/tdlib-arm64/lib/libtdjson.so
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+
+      - name: Create tar.gz
+        run: |
+          mkdir -p dist
+          aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/tg \
+                                   target/aarch64-unknown-linux-gnu/release/tgcd
+          tar -czf dist/telegram-cli_${{ github.ref_name }}_linux_arm64.tar.gz \
+            -C target/aarch64-unknown-linux-gnu/release tg tgcd
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-tarball
+          path: dist/*.tar.gz
+
+  # ── Fedora: .rpm ──────────────────────────────────────────────────
+  build-fedora:
+    runs-on: ubuntu-22.04
+    container: fedora:42
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y cargo cmake gcc gcc-c++ pkgconf zlib-devel openssl-devel \
+            tdlib-devel rpm-build tar
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Strip binaries
+        run: strip target/release/tg target/release/tgcd
+
+      - name: Create .rpm
+        run: |
+          VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')
+          TOPDIR=/tmp/rpmbuild
+          mkdir -p $TOPDIR/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          # Create source tarball
+          tar -czf $TOPDIR/SOURCES/telegram-cli-${VERSION}.tar.gz \
+            --transform "s,^\.,telegram-cli-${VERSION}," .
+
+          cp packaging/rpm/telegram-cli.spec $TOPDIR/SPECS/
+
+          rpmbuild -bb $TOPDIR/SPECS/telegram-cli.spec \
+            --define "_topdir $TOPDIR" \
+            --define "version ${VERSION}" || true
+
+          mkdir -p dist
+          find $TOPDIR/RPMS -name "*.rpm" -exec cp {} dist/ \;
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-rpm
+          path: dist/*.rpm
+
+  # ── Arch Linux: tarball (for AUR) ─────────────────────────────────
+  build-arch:
+    runs-on: ubuntu-22.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm base-devel cmake gperf zlib openssl git rust
+
+      - name: Install TDLib from AUR-like build
+        run: |
+          git clone --depth 1 --branch "v${{ env.TDLIB_VERSION }}" https://github.com/tdlib/td.git /tmp/td
+          cd /tmp/td && mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DTD_ENABLE_JNI=OFF
+          cmake --build . --parallel $(nproc)
+          cmake --install .
+
+      - name: Build
+        run: |
+          export LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
+          cargo build --release
+
+      - name: Strip binaries
+        run: strip target/release/tg target/release/tgcd
+
+      - name: Create Arch package tarball
+        run: |
+          VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')
+          mkdir -p dist
+          tar -czf dist/telegram-cli_${VERSION}_x86_64.pkg.tar.zst \
+            -C target/release tg tgcd
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.zst
+
+  # ── Windows: .exe (zip) ───────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Install TDLib via vcpkg
+        run: C:\vcpkg\vcpkg install tdlib:x64-windows
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        env:
+          LIBTDJSON_PATH: C:\vcpkg\installed\x64-windows\bin\tdjson.dll
+        run: cargo build --release
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v',''
+          $dist = "dist"
+          New-Item -ItemType Directory -Path $dist -Force
+          Compress-Archive -Path "target\release\tg.exe","target\release\tgcd.exe" `
+            -DestinationPath "$dist\telegram-cli_${version}_windows_x86_64.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: dist/*.zip
+
+  # ── macOS: tar.gz ─────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install TDLib
+        run: brew install tdlib
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Strip binaries
+        run: strip target/release/tg target/release/tgcd
+
+      - name: Create tar.gz
+        run: |
+          mkdir -p dist
+          tar -czf dist/telegram-cli_${{ github.ref_name }}_darwin_amd64.tar.gz \
+            -C target/release tg tgcd
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-tarball
+          path: dist/*.tar.gz
+
+  # ── Release: upload all artifacts ─────────────────────────────────
+  release:
+    needs: [build-linux, build-linux-arm64, build-fedora, build-arch, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create release and upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.tar.gz
+            artifacts/**/*.rpm
+            artifacts/**/*.pkg.tar.zst
+            artifacts/**/*.zip
+          generate_release_notes: true
